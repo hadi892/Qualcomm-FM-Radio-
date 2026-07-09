@@ -1,0 +1,18 @@
+<resources>
+    <string name="app_name">Qualcomm FM Radio</string>
+    <string name="no_hw_detected">FM Hardware not detected on this device.</string>
+    <string name="hw_detected">Qualcomm FM Hardware HAL Active</string>
+    <string name="tuning_freq">Tuning Frequency: %1$.1f MHz</string>
+    <string name="rds_label">RDS Program Service:</string>
+    <string name="rt_label">Radio Text:</string>
+    <string name="scanning">Scanning FM band…</string>
+    <string name="power_on">Power ON</string>
+    <string name="power_off">Power OFF</string>
+    <string name="mute">Mute</string>
+    <string name="unmute">Unmute</string>
+    <string name="favorites">Favorites</string>
+    <string name="no_favorites">No saved presets yet</string>
+    <string name="save_preset">Save Preset</string>
+    <string name="rssi_label">Signal RSSI: %1$d dBm</string>
+    <string name="audio_path">Audio Route: %1$s</string>
+</resources>

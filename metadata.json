@@ -1,0 +1,6 @@
+{
+  "name": "Qualcomm FM Radio",
+  "description": "Advanced FM Radio controller targeting Qualcomm FM hardware HAL architecture, featuring station scanning, tuning, RDS data display, audio routing controls, and robust HAL/JNI binding.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
