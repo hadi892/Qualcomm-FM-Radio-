@@ -27,12 +27,23 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Decode Keystore
+      - name: Setup Keystore
         run: |
           if [ -f debug.keystore.base64 ]; then
+            echo "Decoding debug.keystore.base64..."
             base64 -d debug.keystore.base64 > debug.keystore
-          else
-            echo "Warning: debug.keystore.base64 not found."
+          fi
+          if [ ! -f debug.keystore ]; then
+            echo "debug.keystore not found, generating a new one..."
+            keytool -genkey -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
           fi
 
       - name: Build Release APK
