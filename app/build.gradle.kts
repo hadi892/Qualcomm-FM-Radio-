@@ -30,6 +30,26 @@ android {
   }
 
   signingConfigs {
+    val debugKeystoreFile = file("${rootDir}/debug.keystore")
+    if (!debugKeystoreFile.exists()) {
+      println("debug.keystore not found. Automatically generating a new one...")
+      try {
+        ProcessBuilder(
+          "keytool", "-genkey", "-v",
+          "-keystore", debugKeystoreFile.absolutePath,
+          "-storepass", "android",
+          "-alias", "androiddebugkey",
+          "-keypass", "android",
+          "-keyalg", "RSA",
+          "-keysize", "2048",
+          "-validity", "10000",
+          "-dname", "CN=Android Debug,O=Android,C=US"
+        ).start().waitFor()
+      } catch (e: Exception) {
+        println("Warning: Failed to generate debug keystore using ProcessBuilder: ${e.message}")
+      }
+    }
+
     create("release") {
       val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
       val keystoreFile = file(keystorePath)
@@ -40,14 +60,14 @@ android {
         keyPassword = System.getenv("KEY_PASSWORD")
       } else {
         // Fallback to debug keystore for CI / standard developer builds when release keys are not set
-        storeFile = file("${rootDir}/debug.keystore")
+        storeFile = debugKeystoreFile
         storePassword = "android"
         keyAlias = "androiddebugkey"
         keyPassword = "android"
       }
     }
     create("debugConfig") {
-      storeFile = file("${rootDir}/debug.keystore")
+      storeFile = debugKeystoreFile
       storePassword = "android"
       keyAlias = "androiddebugkey"
       keyPassword = "android"
