@@ -27,6 +27,14 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
+      - name: Decode Keystore
+        run: |
+          if [ -f debug.keystore.base64 ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+          else
+            echo "Warning: debug.keystore.base64 not found."
+          fi
+
       - name: Build Release APK
         run: gradle :app:assembleRelease --stacktrace
 
