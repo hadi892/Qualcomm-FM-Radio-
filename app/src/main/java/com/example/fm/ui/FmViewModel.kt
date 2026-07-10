@@ -82,7 +82,7 @@ class FmViewModel(
         viewModelScope.launch {
             try {
                 _diagnosticsReport.value = FmNative.getDiagnosticsReport()
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 Log.e("FmViewModel", "Error fetching diagnostics", e)
                 _diagnosticsReport.value = "Failed to run diagnostics: ${e.message}"
             }
@@ -93,7 +93,7 @@ class FmViewModel(
         viewModelScope.launch {
             try {
                 _isHwSupported.value = FmNative.isHardwareSupported()
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 Log.e("FmViewModel", "Error checking hardware support", e)
                 _isHwSupported.value = false
             }
@@ -128,8 +128,8 @@ class FmViewModel(
             if (_isPowerOn.value) {
                 try {
                     FmNative.closeFm()
-                } catch (e: UnsatisfiedLinkError) {
-                    Log.e("FmViewModel", "Native closeFm UnsatisfiedLinkError", e)
+                } catch (e: Throwable) {
+                    Log.e("FmViewModel", "Native closeFm failure", e)
                 }
                 _isPowerOn.value = false
                 _rdsText.value = null
@@ -156,11 +156,7 @@ class FmViewModel(
                         _lastPowerError.value = "FM Driver Init Failed: No accessible hardware interface found (No /dev/radio0 and no loadable QTI HAL libraries on this Samsung SoC)."
                         refreshDiagnostics()
                     }
-                } catch (e: UnsatisfiedLinkError) {
-                    Log.e("FmViewModel", "Native initFm UnsatisfiedLinkError", e)
-                    _lastPowerError.value = "Native Link Error: JNI shared library symbols could not be resolved (${e.message})."
-                    refreshDiagnostics()
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
                     Log.e("FmViewModel", "Error turning FM on", e)
                     _lastPowerError.value = "Error: ${e.message}"
                     refreshDiagnostics()
@@ -176,7 +172,7 @@ class FmViewModel(
             if (_isPowerOn.value) {
                 try {
                     FmNative.setFrequency(freqKHz)
-                } catch (e: UnsatisfiedLinkError) {
+                } catch (e: Throwable) {
                     Log.e("FmViewModel", "Native setFrequency failure", e)
                 }
                 _rdsText.value = null
@@ -203,7 +199,7 @@ class FmViewModel(
             val direction = if (up) 1 else 0
             try {
                 FmNative.startSearch(direction)
-            } catch (e: UnsatisfiedLinkError) {
+            } catch (e: Throwable) {
                 Log.e("FmViewModel", "Native startSearch failure", e)
             }
             
@@ -214,7 +210,7 @@ class FmViewModel(
                 if (freq in 87500..108000) {
                     _currentFreqKHz.value = freq
                 }
-            } catch (e: UnsatisfiedLinkError) {
+            } catch (e: Throwable) {
                 Log.e("FmViewModel", "Native getFrequency failure during scan", e)
             }
             _isScanning.value = false
@@ -228,7 +224,7 @@ class FmViewModel(
             try {
                 FmNative.setMute(nextMute)
                 _isMuted.value = nextMute
-            } catch (e: UnsatisfiedLinkError) {
+            } catch (e: Throwable) {
                 Log.e("FmViewModel", "Native setMute failure", e)
             }
         }
@@ -277,7 +273,7 @@ class FmViewModel(
                         if (rds != null && rds != _rdsText.value) {
                             _rdsText.value = rds
                         }
-                    } catch (e: UnsatisfiedLinkError) {
+                    } catch (e: Throwable) {
                         Log.e("FmViewModel", "Native polling failure", e)
                     }
                 }
@@ -297,7 +293,7 @@ class FmViewModel(
         if (_isPowerOn.value) {
             try {
                 FmNative.closeFm()
-            } catch (e: UnsatisfiedLinkError) {
+            } catch (e: Throwable) {
                 Log.e("FmViewModel", "Native closeFm onCleared failure", e)
             }
         }

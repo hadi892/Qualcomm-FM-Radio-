@@ -135,6 +135,40 @@ fun FmScreen(
                 )
             }
 
+            // Real Hardware Unavailable Diagnostic warning card
+            AnimatedVisibility(visible = !isHwSupported) {
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = "Hardware Error",
+                                tint = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "FM Hardware Unavailable",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Low-level driver nodes (/dev/radio0) and Qualcomm dynamic libraries are missing. This indicates the application is running on an unsupported architecture, a virtual emulator, or a device without a physical Qualcomm/Samsung FM tuner chip. Please review the detailed diagnostics report and ELF analysis logs below.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.85f)
+                        )
+                    }
+                }
+            }
+
             // Central Dashboard
             FmDashboard(
                 isPowerOn = isPowerOn,
@@ -162,7 +196,8 @@ fun FmScreen(
                 isMuted = isMuted,
                 currentFreqKHz = currentFreqKHz,
                 savedPresets = savedPresets,
-                audioRoute = audioRoute
+                audioRoute = audioRoute,
+                isHwSupported = isHwSupported
             )
 
             // Saved Station Presets
@@ -532,7 +567,8 @@ fun TunerControlPanel(
     isMuted: Boolean,
     currentFreqKHz: Int,
     savedPresets: List<FmPreset>,
-    audioRoute: String
+    audioRoute: String,
+    isHwSupported: Boolean
 ) {
     val hasFavorite = savedPresets.any { it.frequencyKHz == currentFreqKHz }
     val powerButtonColor by animateColorAsState(
@@ -551,7 +587,12 @@ fun TunerControlPanel(
         ) {
             Button(
                 onClick = { viewModel.togglePower() },
-                colors = ButtonDefaults.buttonColors(containerColor = powerButtonColor),
+                enabled = isHwSupported,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = powerButtonColor,
+                    disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                    disabledContentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                ),
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier
                     .weight(1.2f)

@@ -18,11 +18,14 @@
 #include <link.h>
 #include <filesystem>
 #include <sys/utsname.h>
+#include <mutex>
 
 #define LOG_TAG "FM_JNI_HAL"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+
+static std::mutex g_fm_mutex;
 
 // HAL Function Pointers (RAII-safe wrapper)
 typedef int (*fm_power_up_t)(void*);
@@ -128,16 +131,35 @@ static std::string run_shell_command(const std::string& cmd) {
     return result;
 }
 
+static std::string sanitize_utf8(const std::string& str) {
+    std::string clean;
+    clean.reserve(str.size());
+    for (char c : str) {
+        // Allow standard printable ASCII, tab, newline, carriage return
+        if ((c >= 32 && c <= 126) || c == '\n' || c == '\r' || c == '\t') {
+            clean += c;
+        } else {
+            clean += '?';
+        }
+    }
+    return clean;
+}
+
 namespace fs = std::filesystem;
 
-// Recursive directory scanning for target library files
+// Recursive directory scanning for target library files with strict depth-limit of 2
 static void scan_dir_recursive(const std::string& path_str, const std::string& pattern, std::vector<std::string>& results) {
     try {
         fs::path path(path_str);
         if (!fs::exists(path) || !fs::is_directory(path)) return;
         
-        for (const auto& entry : fs::recursive_directory_iterator(path, fs::directory_options::skip_permission_denied)) {
+        auto iter = fs::recursive_directory_iterator(path, fs::directory_options::skip_permission_denied);
+        for (const auto& entry : iter) {
             try {
+                if (iter.depth() > 2) {
+                    iter.pop();
+                    continue;
+                }
                 if (entry.is_regular_file()) {
                     std::string filename = entry.path().filename().string();
                     std::string path_string = entry.path().string();
@@ -245,6 +267,12 @@ static ElfDependencyInfo analyze_elf_dependencies(const std::string& path) {
 
         info.architecture = get_elf_machine_name(ehdr.e_machine);
 
+        if (ehdr.e_phnum > 128) {
+            info.error = "Too many program headers (corrupt ELF)";
+            fclose(f);
+            return info;
+        }
+
         std::vector<Elf64_Phdr> phdrs(ehdr.e_phnum);
         fseek(f, ehdr.e_phoff, SEEK_SET);
         if (fread(phdrs.data(), sizeof(Elf64_Phdr), ehdr.e_phnum, f) != ehdr.e_phnum) {
@@ -270,6 +298,12 @@ static ElfDependencyInfo analyze_elf_dependencies(const std::string& path) {
         }
 
         size_t num_dyn = dynamic_phdr->p_filesz / sizeof(Elf64_Dyn);
+        if (num_dyn > 1024) {
+            info.error = "Too many dynamic entries (corrupt ELF)";
+            fclose(f);
+            return info;
+        }
+
         std::vector<Elf64_Dyn> dyns(num_dyn);
         fseek(f, dynamic_phdr->p_offset, SEEK_SET);
         if (fread(dyns.data(), sizeof(Elf64_Dyn), num_dyn, f) != num_dyn) {
@@ -316,7 +350,7 @@ static ElfDependencyInfo analyze_elf_dependencies(const std::string& path) {
         if (soname_offset != 0) {
             fseek(f, strtab_offset + soname_offset, SEEK_SET);
             char c;
-            while (fread(&c, 1, 1, f) == 1 && c != '\0') {
+            while (info.soname.size() < 256 && fread(&c, 1, 1, f) == 1 && c != '\0') {
                 info.soname += c;
             }
         }
@@ -325,7 +359,7 @@ static ElfDependencyInfo analyze_elf_dependencies(const std::string& path) {
             fseek(f, strtab_offset + offset, SEEK_SET);
             std::string needed_lib;
             char c;
-            while (fread(&c, 1, 1, f) == 1 && c != '\0') {
+            while (needed_lib.size() < 256 && fread(&c, 1, 1, f) == 1 && c != '\0') {
                 needed_lib += c;
             }
             if (!needed_lib.empty()) {
@@ -341,6 +375,12 @@ static ElfDependencyInfo analyze_elf_dependencies(const std::string& path) {
         }
 
         info.architecture = get_elf_machine_name(ehdr.e_machine);
+
+        if (ehdr.e_phnum > 128) {
+            info.error = "Too many program headers (corrupt ELF)";
+            fclose(f);
+            return info;
+        }
 
         std::vector<Elf32_Phdr> phdrs(ehdr.e_phnum);
         fseek(f, ehdr.e_phoff, SEEK_SET);
@@ -367,6 +407,12 @@ static ElfDependencyInfo analyze_elf_dependencies(const std::string& path) {
         }
 
         size_t num_dyn = dynamic_phdr->p_filesz / sizeof(Elf32_Dyn);
+        if (num_dyn > 1024) {
+            info.error = "Too many dynamic entries (corrupt ELF)";
+            fclose(f);
+            return info;
+        }
+
         std::vector<Elf32_Dyn> dyns(num_dyn);
         fseek(f, dynamic_phdr->p_offset, SEEK_SET);
         if (fread(dyns.data(), sizeof(Elf32_Dyn), num_dyn, f) != num_dyn) {
@@ -413,7 +459,7 @@ static ElfDependencyInfo analyze_elf_dependencies(const std::string& path) {
         if (soname_offset != 0) {
             fseek(f, strtab_offset + soname_offset, SEEK_SET);
             char c;
-            while (fread(&c, 1, 1, f) == 1 && c != '\0') {
+            while (info.soname.size() < 256 && fread(&c, 1, 1, f) == 1 && c != '\0') {
                 info.soname += c;
             }
         }
@@ -422,7 +468,7 @@ static ElfDependencyInfo analyze_elf_dependencies(const std::string& path) {
             fseek(f, strtab_offset + offset, SEEK_SET);
             std::string needed_lib;
             char c;
-            while (fread(&c, 1, 1, f) == 1 && c != '\0') {
+            while (needed_lib.size() < 256 && fread(&c, 1, 1, f) == 1 && c != '\0') {
                 needed_lib += c;
             }
             if (!needed_lib.empty()) {
@@ -670,6 +716,7 @@ extern "C" {
 
 JNIEXPORT jboolean JNICALL
 Java_com_example_fm_FmNative_isHardwareSupported(JNIEnv *env, jobject thiz) {
+    std::lock_guard<std::mutex> lock(g_fm_mutex);
     LOGI("Running isHardwareSupported() check...");
 
     if (load_qualcomm_hal()) {
@@ -705,6 +752,7 @@ Java_com_example_fm_FmNative_isHardwareSupported(JNIEnv *env, jobject thiz) {
 
 JNIEXPORT jint JNICALL
 Java_com_example_fm_FmNative_initFm(JNIEnv *env, jobject thiz) {
+    std::lock_guard<std::mutex> lock(g_fm_mutex);
     LOGI("Powering up and initializing Qualcomm FM hardware...");
 
     if (load_qualcomm_hal()) {
@@ -745,6 +793,7 @@ Java_com_example_fm_FmNative_initFm(JNIEnv *env, jobject thiz) {
 
 JNIEXPORT jint JNICALL
 Java_com_example_fm_FmNative_closeFm(JNIEnv *env, jobject thiz) {
+    std::lock_guard<std::mutex> lock(g_fm_mutex);
     LOGI("Powering off and releasing Qualcomm FM hardware...");
 
     if (g_hal.power_down) {
@@ -761,6 +810,7 @@ Java_com_example_fm_FmNative_closeFm(JNIEnv *env, jobject thiz) {
 
 JNIEXPORT jint JNICALL
 Java_com_example_fm_FmNative_setFrequency(JNIEnv *env, jobject thiz, jint freq_khz) {
+    std::lock_guard<std::mutex> lock(g_fm_mutex);
     LOGI("Tuning receiver to station: %d KHz", freq_khz);
 
     if (g_hal.tune) {
@@ -793,6 +843,7 @@ Java_com_example_fm_FmNative_setFrequency(JNIEnv *env, jobject thiz, jint freq_k
 
 JNIEXPORT jint JNICALL
 Java_com_example_fm_FmNative_getFrequency(JNIEnv *env, jobject thiz) {
+    std::lock_guard<std::mutex> lock(g_fm_mutex);
     if (g_radio_fd.is_valid()) {
         struct v4l2_frequency frequency;
         memset(&frequency, 0, sizeof(frequency));
@@ -808,6 +859,7 @@ Java_com_example_fm_FmNative_getFrequency(JNIEnv *env, jobject thiz) {
 
 JNIEXPORT jint JNICALL
 Java_com_example_fm_FmNative_startSearch(JNIEnv *env, jobject thiz, jint direction) {
+    std::lock_guard<std::mutex> lock(g_fm_mutex);
     LOGI("Starting scan/search, direction: %s", direction == 0 ? "DOWN" : "UP");
 
     if (g_hal.seek) {
@@ -837,12 +889,14 @@ Java_com_example_fm_FmNative_startSearch(JNIEnv *env, jobject thiz, jint directi
 
 JNIEXPORT jint JNICALL
 Java_com_example_fm_FmNative_cancelSearch(JNIEnv *env, jobject thiz) {
+    std::lock_guard<std::mutex> lock(g_fm_mutex);
     LOGI("Canceling active frequency search.");
     return 0;
 }
 
 JNIEXPORT jstring JNICALL
 Java_com_example_fm_FmNative_getRdsData(JNIEnv *env, jobject thiz) {
+    std::lock_guard<std::mutex> lock(g_fm_mutex);
     if (g_radio_fd.is_valid()) {
         struct v4l2_rds_data rds_buf[16];
         ssize_t bytes = read(g_radio_fd.get(), rds_buf, sizeof(rds_buf));
@@ -856,11 +910,13 @@ Java_com_example_fm_FmNative_getRdsData(JNIEnv *env, jobject thiz) {
 
 JNIEXPORT jboolean JNICALL
 Java_com_example_fm_FmNative_isMuted(JNIEnv *env, jobject thiz) {
+    std::lock_guard<std::mutex> lock(g_fm_mutex);
     return g_is_muted ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jint JNICALL
 Java_com_example_fm_FmNative_setMute(JNIEnv *env, jobject thiz, jboolean mute) {
+    std::lock_guard<std::mutex> lock(g_fm_mutex);
     LOGI("Setting hardware audio mute: %s", mute ? "MUTED" : "UNMUTED");
     g_is_muted = mute;
 
@@ -881,6 +937,7 @@ Java_com_example_fm_FmNative_setMute(JNIEnv *env, jobject thiz, jboolean mute) {
 
 JNIEXPORT jint JNICALL
 Java_com_example_fm_FmNative_getSignalStrength(JNIEnv *env, jobject thiz) {
+    std::lock_guard<std::mutex> lock(g_fm_mutex);
     if (g_hal.get_rssi) {
         int rssi = 0;
         if (g_hal.get_rssi(&rssi) >= 0) {
@@ -902,6 +959,7 @@ Java_com_example_fm_FmNative_getSignalStrength(JNIEnv *env, jobject thiz) {
 
 JNIEXPORT jint JNICALL
 Java_com_example_fm_FmNative_setBand(JNIEnv *env, jobject thiz, jint band) {
+    std::lock_guard<std::mutex> lock(g_fm_mutex);
     LOGI("Setting FM band to: %d", band);
     g_current_band = band;
     return 0;
@@ -909,6 +967,7 @@ Java_com_example_fm_FmNative_setBand(JNIEnv *env, jobject thiz, jint band) {
 
 JNIEXPORT jstring JNICALL
 Java_com_example_fm_FmNative_getDiagnosticsReport(JNIEnv *env, jobject thiz) {
+    std::lock_guard<std::mutex> lock(g_fm_mutex);
     LOGI("Generating full high-resolution FM hardware diagnostics report...");
     std::string report;
 
@@ -928,10 +987,14 @@ Java_com_example_fm_FmNative_getDiagnosticsReport(JNIEnv *env, jobject thiz) {
     report += "SELinux Mode: " + check_selinux_status() + "\n";
     report += "App Security Domain: " + get_selinux_context() + "\n\n";
 
-    // Stage 2: Partition Shared Library Search
+    // Stage 2: Partition Shared Library Search (Optimized target-only search to avoid timeouts)
     report += "=== STAGE 2: PARTITION SHARED LIBRARY SEARCH ===\n";
     std::vector<std::string> search_dirs = {
-        "/vendor", "/system", "/system_ext", "/product", "/odm", "/apex"
+        "/vendor/lib64", "/vendor/lib",
+        "/system/lib64", "/system/lib",
+        "/system_ext/lib64", "/system_ext/lib",
+        "/odm/lib64", "/odm/lib",
+        "/product/lib64", "/product/lib"
     };
     std::vector<std::string> discovered_libs;
     bool lib_exists = false;
@@ -1215,7 +1278,7 @@ Java_com_example_fm_FmNative_getDiagnosticsReport(JNIEnv *env, jobject thiz) {
     report += "FM Powered: " + state_fm_powered + "\n";
     report += "FM Operational: " + state_fm_operational + "\n";
 
-    return env->NewStringUTF(report.c_str());
+    return env->NewStringUTF(sanitize_utf8(report).c_str());
 }
 
 }
