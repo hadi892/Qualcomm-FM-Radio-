@@ -56,6 +56,12 @@ class FmViewModel(
     private val _headsetConnected = MutableStateFlow(false)
     val headsetConnected: StateFlow<Boolean> = _headsetConnected.asStateFlow()
 
+    private val _diagnosticsReport = MutableStateFlow("Loading low-level JNI diagnostics report...")
+    val diagnosticsReport: StateFlow<String> = _diagnosticsReport.asStateFlow()
+
+    private val _lastPowerError = MutableStateFlow<String?>(null)
+    val lastPowerError: StateFlow<String?> = _lastPowerError.asStateFlow()
+
     // Observe saved presets reactively from Room
     val savedPresets: StateFlow<List<FmPreset>> = repository.allPresets
         .stateIn(
@@ -69,6 +75,18 @@ class FmViewModel(
     init {
         checkHardwareSupport()
         checkHeadsetConnection()
+        refreshDiagnostics()
+    }
+
+    fun refreshDiagnostics() {
+        viewModelScope.launch {
+            try {
+                _diagnosticsReport.value = FmNative.getDiagnosticsReport()
+            } catch (e: Exception) {
+                Log.e("FmViewModel", "Error fetching diagnostics", e)
+                _diagnosticsReport.value = "Failed to run diagnostics: ${e.message}"
+            }
+        }
     }
 
     fun checkHardwareSupport() {
@@ -101,6 +119,10 @@ class FmViewModel(
         }
     }
 
+    fun clearPowerError() {
+        _lastPowerError.value = null
+    }
+
     fun togglePower() {
         viewModelScope.launch {
             if (_isPowerOn.value) {
@@ -112,12 +134,15 @@ class FmViewModel(
                 _isPowerOn.value = false
                 _rdsText.value = null
                 _rssi.value = 0
+                _lastPowerError.value = null
                 stopPolling()
             } else {
+                _lastPowerError.value = null
                 try {
                     val res = FmNative.initFm()
                     if (res >= 0) {
                         _isPowerOn.value = true
+                        _lastPowerError.value = null
                         val freq = FmNative.getFrequency()
                         if (freq in 87500..108000) {
                             _currentFreqKHz.value = freq
@@ -128,10 +153,17 @@ class FmViewModel(
                         startPolling()
                     } else {
                         Log.e("FmViewModel", "FM hardware init failed")
-                        // In case hardware fails or isn't present, we don't switch power state
+                        _lastPowerError.value = "FM Driver Init Failed: No accessible hardware interface found (No /dev/radio0 and no loadable QTI HAL libraries on this Samsung SoC)."
+                        refreshDiagnostics()
                     }
                 } catch (e: UnsatisfiedLinkError) {
                     Log.e("FmViewModel", "Native initFm UnsatisfiedLinkError", e)
+                    _lastPowerError.value = "Native Link Error: JNI shared library symbols could not be resolved (${e.message})."
+                    refreshDiagnostics()
+                } catch (e: Exception) {
+                    Log.e("FmViewModel", "Error turning FM on", e)
+                    _lastPowerError.value = "Error: ${e.message}"
+                    refreshDiagnostics()
                 }
             }
         }

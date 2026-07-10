@@ -99,6 +99,8 @@ fun FmScreen(
     val audioRoute by viewModel.audioRoute.collectAsState()
     val headsetConnected by viewModel.headsetConnected.collectAsState()
     val savedPresets by viewModel.savedPresets.collectAsState()
+    val diagnosticsReport by viewModel.diagnosticsReport.collectAsState()
+    val lastPowerError by viewModel.lastPowerError.collectAsState()
 
     var showArchitectureDetails by remember { mutableStateOf(false) }
 
@@ -120,6 +122,15 @@ fun FmScreen(
             // Warning if headphones are missing (Headphones act as physical FM aerial antenna)
             AnimatedVisibility(visible = !headsetConnected) {
                 AntennaWarningCard()
+            }
+
+            // Power/Init Failure Error Card
+            AnimatedVisibility(visible = lastPowerError != null) {
+                PowerErrorCard(
+                    errorMessage = lastPowerError ?: "",
+                    onDismiss = { viewModel.clearPowerError() },
+                    onRefresh = { viewModel.refreshDiagnostics() }
+                )
             }
 
             // Central Dashboard
@@ -167,6 +178,18 @@ fun FmScreen(
             ArchitectureBlueprintCard(
                 expanded = showArchitectureDetails,
                 onToggleExpand = { showArchitectureDetails = !showArchitectureDetails }
+            )
+
+            // Low-Level Real Diagnostics Panel
+            IndividualDiagnosticsPanel(
+                diagnosticsReport = diagnosticsReport,
+                onRefresh = { viewModel.refreshDiagnostics() }
+            )
+
+            // JNI Console Log View
+            JniDiagnosticsConsole(
+                report = diagnosticsReport,
+                onRefresh = { viewModel.refreshDiagnostics() }
             )
         }
     }
@@ -708,6 +731,24 @@ fun TunerControlPanel(
                 style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
             )
         }
+
+        if (!isPowerOn) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                ),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "Scan & Seek controls are currently disabled because FM power is OFF. Turn FM power ON to scan the airwaves.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                    modifier = Modifier.padding(12.dp),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+            }
+        }
     }
 }
 
@@ -923,4 +964,299 @@ fun StackArrow() {
         color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
         modifier = Modifier.padding(vertical = 2.dp)
     )
+}
+
+enum class DiagnosticStatusType {
+    SUCCESS, WARNING, ERROR, INFO
+}
+
+@Composable
+fun DiagnosticStatusRow(
+    label: String,
+    statusText: String,
+    statusType: DiagnosticStatusType
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f)
+        )
+        
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(10.dp)
+                    .clip(CircleShape)
+                    .background(
+                        when (statusType) {
+                            DiagnosticStatusType.SUCCESS -> Color(0xFF2E7D32)
+                            DiagnosticStatusType.WARNING -> Color(0xFFEF6C00)
+                            DiagnosticStatusType.ERROR -> Color(0xFFC62828)
+                            DiagnosticStatusType.INFO -> MaterialTheme.colorScheme.primary
+                        }
+                    )
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = statusText,
+                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                color = when (statusType) {
+                    DiagnosticStatusType.SUCCESS -> Color(0xFF2E7D32)
+                    DiagnosticStatusType.WARNING -> Color(0xFFEF6C00)
+                    DiagnosticStatusType.ERROR -> Color(0xFFC62828)
+                    DiagnosticStatusType.INFO -> MaterialTheme.colorScheme.primary
+                }
+            )
+        }
+    }
+}
+
+@Composable
+fun IndividualDiagnosticsPanel(
+    diagnosticsReport: String,
+    onRefresh: () -> Unit
+) {
+    val hasDriverNode = diagnosticsReport.contains("[FOUND & ACCESSIBLE (OK)]")
+    val hasPermissionDenied = diagnosticsReport.contains("Permission Denied") || diagnosticsReport.contains("ACCESS FAILED (errno: 13")
+    val hasHalLib = diagnosticsReport.contains("dlopen: SUCCESS")
+    val hasBinderSvc = diagnosticsReport.contains("Found Binder Service:")
+
+    val platformPlatform = diagnosticsReport.lines()
+        .firstOrNull { it.startsWith("ro.board.platform:") }
+        ?.substringAfter("ro.board.platform:")?.trim() ?: "UNKNOWN"
+        
+    val modelName = diagnosticsReport.lines()
+        .firstOrNull { it.startsWith("ro.product.model:") }
+        ?.substringAfter("ro.product.model:")?.trim() ?: "UNKNOWN"
+
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+        ),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.DeveloperMode,
+                        contentDescription = "Diagnostics",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = "Hardware Diagnostic Signals",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Button(
+                    onClick = onRefresh,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    ),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                    modifier = Modifier.height(32.dp)
+                ) {
+                    Text("Rescan", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+
+            // 1. Kernel Driver Node Status
+            DiagnosticStatusRow(
+                label = "V4L2 Tuner Node (/dev/radio0)",
+                statusText = when {
+                    hasDriverNode -> "Accessible"
+                    hasPermissionDenied -> "SELinux Block"
+                    else -> "Missing"
+                },
+                statusType = when {
+                    hasDriverNode -> DiagnosticStatusType.SUCCESS
+                    hasPermissionDenied -> DiagnosticStatusType.WARNING
+                    else -> DiagnosticStatusType.ERROR
+                }
+            )
+
+            // 2. HAL Shared Library Status
+            DiagnosticStatusRow(
+                label = "FM HAL (libfmpal.so)",
+                statusText = if (hasHalLib) "Loaded" else "Missing",
+                statusType = if (hasHalLib) DiagnosticStatusType.SUCCESS else DiagnosticStatusType.ERROR
+            )
+
+            // 3. Binder Service Status
+            DiagnosticStatusRow(
+                label = "Binder FM Service",
+                statusText = if (hasBinderSvc) "Registered" else "Not Registered",
+                statusType = if (hasBinderSvc) DiagnosticStatusType.SUCCESS else DiagnosticStatusType.ERROR
+            )
+
+            // 4. Board Platform SoC
+            DiagnosticStatusRow(
+                label = "Soc Board Platform",
+                statusText = "$platformPlatform ($modelName)",
+                statusType = if (platformPlatform != "UNKNOWN/NOT_SET" && platformPlatform != "UNKNOWN") DiagnosticStatusType.INFO else DiagnosticStatusType.WARNING
+            )
+        }
+    }
+}
+
+@Composable
+fun PowerErrorCard(
+    errorMessage: String,
+    onDismiss: () -> Unit,
+    onRefresh: () -> Unit
+) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.errorContainer
+        ),
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = "Error",
+                        tint = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "FM Initialization Failed",
+                        style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
+                IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
+                    Text("✕", color = MaterialTheme.colorScheme.onErrorContainer, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            Text(
+                text = errorMessage,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.9f)
+            )
+
+            Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = {
+                        onDismiss()
+                        onRefresh()
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.onError,
+                        contentColor = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                ) {
+                    Text("Rescan Hardware", style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun JniDiagnosticsConsole(
+    report: String,
+    onRefresh: () -> Unit
+) {
+    var isExpanded by remember { mutableStateOf(false) }
+
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+        ),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.DeveloperMode,
+                        contentDescription = "JNI Console",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = "Qualcomm JNI Console Logs",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Button(
+                    onClick = { isExpanded = !isExpanded },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                    ),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                    modifier = Modifier.height(32.dp)
+                ) {
+                    Text(if (isExpanded) "Hide Logs" else "Show Logs", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+
+            if (isExpanded) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(250.dp)
+                        .background(Color.Black, RoundedCornerShape(8.dp))
+                        .border(1.dp, Color.DarkGray, RoundedCornerShape(8.dp))
+                        .padding(8.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        Text(
+                            text = report,
+                            color = Color(0xFF00FF00),
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            lineHeight = 16.sp
+                        )
+                    }
+                }
+            }
+        }
+    }
 }

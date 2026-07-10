@@ -82,4 +82,9 @@ object FmNative {
      * @return 0 on success, negative values on error.
      */
     external fun setBand(band: Int): Int
+
+    /**
+     * Queries detailed HAL, service, properties, and device node diagnostics.
+     */
+    external fun getDiagnosticsReport(): String
 }
