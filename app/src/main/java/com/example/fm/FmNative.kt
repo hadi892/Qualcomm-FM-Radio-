@@ -7,7 +7,7 @@ object FmNative {
         try {
             System.loadLibrary("fm_jni")
             Log.i("FmNative", "Successfully loaded native fm_jni library")
-        } catch (e: UnsatisfiedLinkError) {
+        } catch (e: Throwable) {
             Log.e("FmNative", "Failed to load native fm_jni library. This is expected if NDK compile has not run or running on non-Android platform.", e)
         }
     }

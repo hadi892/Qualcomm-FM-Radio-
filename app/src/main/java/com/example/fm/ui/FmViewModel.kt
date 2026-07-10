@@ -12,6 +12,8 @@ import androidx.lifecycle.viewModelScope
 import com.example.fm.FmNative
 import com.example.fm.data.FmPreset
 import com.example.fm.data.FmRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -79,9 +81,10 @@ class FmViewModel(
     }
 
     fun refreshDiagnostics() {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             try {
-                _diagnosticsReport.value = FmNative.getDiagnosticsReport()
+                val report = FmNative.getDiagnosticsReport()
+                _diagnosticsReport.value = report
             } catch (e: Throwable) {
                 Log.e("FmViewModel", "Error fetching diagnostics", e)
                 _diagnosticsReport.value = "Failed to run diagnostics: ${e.message}"
@@ -90,9 +93,10 @@ class FmViewModel(
     }
 
     fun checkHardwareSupport() {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             try {
-                _isHwSupported.value = FmNative.isHardwareSupported()
+                val supported = FmNative.isHardwareSupported()
+                _isHwSupported.value = supported
             } catch (e: Throwable) {
                 Log.e("FmViewModel", "Error checking hardware support", e)
                 _isHwSupported.value = false
@@ -124,7 +128,7 @@ class FmViewModel(
     }
 
     fun togglePower() {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             if (_isPowerOn.value) {
                 try {
                     FmNative.closeFm()
@@ -167,7 +171,7 @@ class FmViewModel(
 
     fun setFrequency(freqKHz: Int) {
         if (freqKHz !in 87500..108000) return
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             _currentFreqKHz.value = freqKHz
             if (_isPowerOn.value) {
                 try {
@@ -193,7 +197,7 @@ class FmViewModel(
 
     fun startScan(up: Boolean) {
         if (!_isPowerOn.value) return
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             _isScanning.value = true
             _rdsText.value = null
             val direction = if (up) 1 else 0
@@ -219,7 +223,7 @@ class FmViewModel(
 
     fun toggleMute() {
         if (!_isPowerOn.value) return
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val nextMute = !_isMuted.value
             try {
                 FmNative.setMute(nextMute)
@@ -264,7 +268,7 @@ class FmViewModel(
 
     private fun startPolling() {
         stopPolling()
-        pollJob = viewModelScope.launch {
+        pollJob = viewModelScope.launch(Dispatchers.IO) {
             while (true) {
                 if (_isPowerOn.value) {
                     try {
@@ -291,10 +295,12 @@ class FmViewModel(
         super.onCleared()
         stopPolling()
         if (_isPowerOn.value) {
-            try {
-                FmNative.closeFm()
-            } catch (e: Throwable) {
-                Log.e("FmViewModel", "Native closeFm onCleared failure", e)
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    FmNative.closeFm()
+                } catch (e: Throwable) {
+                    Log.e("FmViewModel", "Native closeFm onCleared failure", e)
+                }
             }
         }
     }

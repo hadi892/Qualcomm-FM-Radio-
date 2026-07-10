@@ -6,6 +6,7 @@
 #include <android/log.h>
 #include <dlfcn.h>
 #include <unistd.h>
+#include <cctype>
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -16,7 +17,6 @@
 #include <memory>
 #include <elf.h>
 #include <link.h>
-#include <filesystem>
 #include <sys/utsname.h>
 #include <mutex>
 
@@ -24,8 +24,6 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
-
-namespace fs = std::filesystem;
 
 // HAL Function Pointers
 typedef int (*fm_power_up_t)(void*);
@@ -134,67 +132,77 @@ static std::string sanitize_utf8(const std::string& str) {
     return clean;
 }
 
-// Recursive directory scanning for target library files with strict depth-limit of 2
-static void scan_dir_recursive(const std::string& path_str, const std::string& pattern, std::vector<std::string>& results) {
-    try {
-        fs::path path(path_str);
-        if (!fs::exists(path) || !fs::is_directory(path)) return;
-        
-        auto iter = fs::recursive_directory_iterator(path, fs::directory_options::skip_permission_denied);
-        auto end_iter = fs::recursive_directory_iterator();
-        while (iter != end_iter) {
-            try {
-                if (iter.depth() > 2) {
-                    iter.pop();
-                    continue;
-                }
-                const auto& entry = *iter;
-                if (entry.is_regular_file()) {
-                    std::string filename = entry.path().filename().string();
-                    std::string path_string = entry.path().string();
-                    
-                    if (pattern.empty()) {
-                        if (filename == "vendor.qti.hardware.fm@1.0.so" ||
-                            filename == "vendor.qti.hardware.fm@1.0-impl.so" ||
-                            filename == "libfmpal.so" ||
-                            (filename.rfind("libqcomfm", 0) == 0 && filename.size() > 3 && filename.substr(filename.size() - 3) == ".so") ||
-                            (filename.rfind("libfm", 0) == 0 && filename.size() > 3 && filename.substr(filename.size() - 3) == ".so")) {
-                            results.push_back(path_string);
-                        }
-                    } else {
-                        if (filename.find(pattern) != std::string::npos) {
-                            results.push_back(path_string);
-                        }
+// Recursive directory scanning for target library files with strict depth-limit of 2 using POSIX
+static void scan_dir_recursive(const std::string& path_str, const std::string& pattern, std::vector<std::string>& results, int depth = 0) {
+    if (depth > 2) return;
+    DIR* dir = opendir(path_str.c_str());
+    if (!dir) return;
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        std::string name = entry->d_name;
+        if (name == "." || name == "..") continue;
+
+        std::string full_path = path_str;
+        if (full_path.back() != '/') {
+            full_path += "/";
+        }
+        full_path += name;
+
+        struct stat st;
+        if (lstat(full_path.c_str(), &st) == 0) {
+            bool is_dir = S_ISDIR(st.st_mode);
+            bool is_reg = S_ISREG(st.st_mode);
+
+            // Handle symbolic links safely: only check if they point to a regular file,
+            // never follow symbolic links to directories to prevent infinite recursion/crashes.
+            if (S_ISLNK(st.st_mode)) {
+                struct stat target_st;
+                if (stat(full_path.c_str(), &target_st) == 0) {
+                    if (S_ISREG(target_st.st_mode)) {
+                        is_reg = true;
                     }
                 }
-                ++iter;
-            } catch (...) {
-                try {
-                    ++iter;
-                } catch (...) {
-                    break;
+            }
+
+            if (is_dir) {
+                scan_dir_recursive(full_path, pattern, results, depth + 1);
+            } else if (is_reg) {
+                if (pattern.empty()) {
+                    if (name == "vendor.qti.hardware.fm@1.0.so" ||
+                        name == "vendor.qti.hardware.fm@1.0-impl.so" ||
+                        name == "libfmpal.so" ||
+                        (name.rfind("libqcomfm", 0) == 0 && name.size() > 3 && name.substr(name.size() - 3) == ".so") ||
+                        (name.rfind("libfm", 0) == 0 && name.size() > 3 && name.substr(name.size() - 3) == ".so")) {
+                        results.push_back(full_path);
+                    }
+                } else {
+                    if (name.find(pattern) != std::string::npos) {
+                        results.push_back(full_path);
+                    }
                 }
             }
         }
-    } catch (...) {}
+    }
+    closedir(dir);
 }
 
-// Scanning possible driver nodes in /dev
+// Scanning possible driver nodes in /dev using POSIX
 static std::vector<std::string> get_candidate_device_nodes() {
     std::vector<std::string> nodes;
-    try {
-        fs::path dev_path("/dev");
-        if (fs::exists(dev_path) && fs::is_directory(dev_path)) {
-            for (const auto& entry : fs::directory_iterator(dev_path)) {
-                std::string name = entry.path().filename().string();
-                if (name.find("radio") == 0 || name.find("fm") == 0 || name.find("iris") == 0 ||
-                    name.find("video") == 0 || name.find("v4l") == 0 || name.find("smd") == 0 ||
-                    name.find("adsprpc") == 0) {
-                    nodes.push_back(entry.path().string());
-                }
+    DIR* dir = opendir("/dev");
+    if (dir) {
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            std::string name = entry->d_name;
+            if (name.find("radio") == 0 || name.find("fm") == 0 || name.find("iris") == 0 ||
+                name.find("video") == 0 || name.find("v4l") == 0 || name.find("smd") == 0 ||
+                name.find("adsprpc") == 0) {
+                nodes.push_back("/dev/" + name);
             }
         }
-    } catch (...) {}
+        closedir(dir);
+    }
     if (nodes.empty()) {
         nodes = {"/dev/radio0", "/dev/fm", "/dev/iris"};
     }
@@ -222,13 +230,18 @@ static std::string get_elf_machine_name(uint16_t machine) {
     }
 }
 
-// Unified Templated ELF dependency reader to avoid code duplication
+// Unified Templated ELF dependency reader with strict bounds and file size limits
 template<typename EhdrT, typename PhdrT, typename DynT, typename AddrT>
-static ElfDependencyInfo analyze_elf_templated(FILE* f, const std::string& path) {
+static ElfDependencyInfo analyze_elf_templated(FILE* f, const std::string& path, long file_size) {
     ElfDependencyInfo info;
     info.lib_name = path;
     info.valid = true;
     info.is_64bit = (sizeof(AddrT) == 8);
+
+    if (sizeof(EhdrT) > (size_t)file_size) {
+        info.error = "File too small for ELF header";
+        return info;
+    }
 
     EhdrT ehdr;
     if (fread(&ehdr, 1, sizeof(ehdr), f) != sizeof(ehdr)) {
@@ -240,6 +253,13 @@ static ElfDependencyInfo analyze_elf_templated(FILE* f, const std::string& path)
 
     if (ehdr.e_phnum > 128) {
         info.error = "Too many program headers (corrupt ELF)";
+        return info;
+    }
+
+    if (ehdr.e_phoff > (unsigned long)file_size || 
+        ehdr.e_phnum * sizeof(PhdrT) > (unsigned long)file_size || 
+        ehdr.e_phoff + ehdr.e_phnum * sizeof(PhdrT) > (unsigned long)file_size) {
+        info.error = "Program headers exceed file boundary";
         return info;
     }
 
@@ -262,6 +282,13 @@ static ElfDependencyInfo analyze_elf_templated(FILE* f, const std::string& path)
 
     if (!dynamic_phdr) {
         info.error = "PT_DYNAMIC segment not found";
+        return info;
+    }
+
+    if (dynamic_phdr->p_offset > (unsigned long)file_size || 
+        dynamic_phdr->p_filesz > (unsigned long)file_size || 
+        dynamic_phdr->p_offset + dynamic_phdr->p_filesz > (unsigned long)file_size) {
+        info.error = "Dynamic segment exceeds file boundary";
         return info;
     }
 
@@ -311,24 +338,39 @@ static ElfDependencyInfo analyze_elf_templated(FILE* f, const std::string& path)
         return info;
     }
 
+    if (strtab_offset > (unsigned long)file_size) {
+        info.error = "DT_STRTAB translated offset exceeds file boundary";
+        return info;
+    }
+
     if (soname_offset != 0) {
-        if (fseek(f, strtab_offset + soname_offset, SEEK_SET) == 0) {
-            char c;
-            while (info.soname.size() < 256 && fread(&c, 1, 1, f) == 1 && c != '\0') {
-                info.soname += c;
+        unsigned long target_offset = strtab_offset + soname_offset;
+        if (target_offset < (unsigned long)file_size) {
+            if (fseek(f, target_offset, SEEK_SET) == 0) {
+                char c;
+                while (info.soname.size() < 256 && 
+                       (ftell(f) < file_size) &&
+                       fread(&c, 1, 1, f) == 1 && c != '\0') {
+                    info.soname += c;
+                }
             }
         }
     }
 
     for (auto offset : needed_offsets) {
-        if (fseek(f, strtab_offset + offset, SEEK_SET) == 0) {
-            std::string needed_lib;
-            char c;
-            while (needed_lib.size() < 256 && fread(&c, 1, 1, f) == 1 && c != '\0') {
-                needed_lib += c;
-            }
-            if (!needed_lib.empty()) {
-                info.needed_libs.push_back(needed_lib);
+        unsigned long target_offset = strtab_offset + offset;
+        if (target_offset < (unsigned long)file_size) {
+            if (fseek(f, target_offset, SEEK_SET) == 0) {
+                std::string needed_lib;
+                char c;
+                while (needed_lib.size() < 256 && 
+                       (ftell(f) < file_size) &&
+                       fread(&c, 1, 1, f) == 1 && c != '\0') {
+                    needed_lib += c;
+                }
+                if (!needed_lib.empty()) {
+                    info.needed_libs.push_back(needed_lib);
+                }
             }
         }
     }
@@ -345,6 +387,14 @@ static ElfDependencyInfo analyze_elf_dependencies(const std::string& path) {
         info.error = "Could not open file: " + std::string(strerror(errno));
         return info;
     }
+
+    struct stat st;
+    if (fstat(fileno(f), &st) != 0) {
+        info.error = "Failed to get ELF file stat: " + std::string(strerror(errno));
+        fclose(f);
+        return info;
+    }
+    long file_size = st.st_size;
 
     unsigned char ident[EI_NIDENT];
     if (fread(ident, 1, EI_NIDENT, f) != EI_NIDENT) {
@@ -367,9 +417,9 @@ static ElfDependencyInfo analyze_elf_dependencies(const std::string& path) {
     }
 
     if (elf_class == ELFCLASS64) {
-        info = analyze_elf_templated<Elf64_Ehdr, Elf64_Phdr, Elf64_Dyn, Elf64_Addr>(f, path);
+        info = analyze_elf_templated<Elf64_Ehdr, Elf64_Phdr, Elf64_Dyn, Elf64_Addr>(f, path, file_size);
     } else if (elf_class == ELFCLASS32) {
-        info = analyze_elf_templated<Elf32_Ehdr, Elf32_Phdr, Elf32_Dyn, Elf32_Addr>(f, path);
+        info = analyze_elf_templated<Elf32_Ehdr, Elf32_Phdr, Elf32_Dyn, Elf32_Addr>(f, path, file_size);
     } else {
         info.error = "Unknown ELF class: " + std::to_string(elf_class);
     }
@@ -533,12 +583,36 @@ Java_com_example_fm_FmNative_isHardwareSupported(JNIEnv *env, jobject thiz) {
     std::lock_guard<std::mutex> lock(ctx.getMutex());
     LOGI("Running isHardwareSupported() check...");
 
+    // 1. Check if HAL can be successfully loaded (this is the absolute best indicator)
     if (ctx.loadQualcommHal()) {
         LOGI("Hardware support detected via loaded QTI FM HAL/PAL!");
         ctx.resetHal(); 
         return JNI_TRUE;
     }
 
+    // 2. Check if the library files physically exist, even if we can't dlopen them from untrusted app namespace
+    std::vector<std::string> search_paths = {
+        "/vendor/lib64", "/vendor/lib",
+        "/system/lib64", "/system/lib",
+        "/system_ext/lib64", "/odm/lib64", "/product/lib64"
+    };
+    std::vector<std::string> target_patterns = {
+        "vendor.qti.hardware.fm@1.0.so",
+        "vendor.qti.hardware.fm@1.0-impl.so",
+        "libfmpal.so"
+    };
+    for (const auto& dir : search_paths) {
+        for (const auto& pattern : target_patterns) {
+            std::vector<std::string> matches;
+            scan_dir_recursive(dir, pattern, matches);
+            if (!matches.empty()) {
+                LOGI("Hardware support detected: Qualcomm FM HAL libraries found on disk in %s!", dir.c_str());
+                return JNI_TRUE;
+            }
+        }
+    }
+
+    // 3. Check V4L2 device nodes
     auto nodes = get_candidate_device_nodes();
     for (const auto& node : nodes) {
         int fd = open(node.c_str(), O_RDONLY);
@@ -546,17 +620,57 @@ Java_com_example_fm_FmNative_isHardwareSupported(JNIEnv *env, jobject thiz) {
             LOGI("Hardware support detected via active device node: %s", node.c_str());
             close(fd);
             return JNI_TRUE;
-        } else if (errno == EACCES) {
-            LOGI("Device node exists but lacks permissions: %s (Permission Denied). This indicates hardware presence!", node.c_str());
+        } else if (errno != ENOENT) {
+            LOGI("Device node exists: %s (Open error: %d - %s). This indicates physical hardware presence!", node.c_str(), errno, strerror(errno));
             return JNI_TRUE;
         }
     }
 
+    // 4. Check system/SoC properties for Qualcomm Snapdragon or Samsung SoC signatures
     std::string platform = get_system_property("ro.board.platform");
     std::string hardware = get_system_property("ro.hardware");
+    std::string soc_manufacturer = get_system_property("ro.soc.manufacturer");
+    std::string board = get_system_property("ro.product.board");
+    std::string device = get_system_property("ro.product.device");
+
+    // Convert all to lowercase for case-insensitive robust checking
+    auto to_lower = [](std::string s) {
+        for (char &c : s) c = std::tolower((unsigned char)c);
+        return s;
+    };
+    platform = to_lower(platform);
+    hardware = to_lower(hardware);
+    soc_manufacturer = to_lower(soc_manufacturer);
+    board = to_lower(board);
+    device = to_lower(device);
+
+    LOGI("SoC Props: platform=%s, hardware=%s, manufacturer=%s, board=%s, device=%s",
+         platform.c_str(), hardware.c_str(), soc_manufacturer.c_str(), board.c_str(), device.c_str());
+
+    // Qualcomm / Snapdragon platform indicators (including SM Snapdragon Mobile platforms, SDM, msm, etc.)
     if (platform.find("qcom") != std::string::npos || platform.find("msm") != std::string::npos ||
-        hardware.find("qcom") != std::string::npos || hardware.find("s5e") != std::string::npos) {
-        LOGI("Hardware platform is Qualcomm/Samsung SoC: %s / %s. Supporting FM.", platform.c_str(), hardware.c_str());
+        platform.find("sdm") != std::string::npos || platform.rfind("sm", 0) == 0 ||
+        platform.find("bengal") != std::string::npos || platform.find("taro") != std::string::npos ||
+        platform.find("lahaina") != std::string::npos || platform.find("kona") != std::string::npos ||
+        platform.find("khaje") != std::string::npos || platform.find("monaco") != std::string::npos ||
+        platform.find("gta9") != std::string::npos ||
+        hardware.find("qcom") != std::string::npos || hardware.find("s5e") != std::string::npos ||
+        soc_manufacturer.find("qti") != std::string::npos || soc_manufacturer.find("qualcomm") != std::string::npos ||
+        board.find("qcom") != std::string::npos || board.find("msm") != std::string::npos) {
+        LOGI("Hardware platform is Qualcomm/Samsung/Snapdragon SoC. Supporting FM.");
+        return JNI_TRUE;
+    }
+
+    // 5. If it's a physical ARM or ARM64 Android device (not a qemu / ranchu x86 emulator), default to true
+    // so the user can always attempt to initialize FM.
+    std::string abi = get_system_property("ro.product.cpu.abi");
+    abi = to_lower(abi);
+    bool is_emulator = (hardware.find("goldfish") != std::string::npos || 
+                        hardware.find("ranchu") != std::string::npos || 
+                        hardware.find("sdk_") != std::string::npos ||
+                        device.find("emulator") != std::string::npos);
+    if (!is_emulator && (abi.find("arm") != std::string::npos || abi.find("aarch64") != std::string::npos)) {
+        LOGI("Physical ARM/ARM64 device detected (non-emulator). Allowing FM access support.");
         return JNI_TRUE;
     }
 
@@ -586,7 +700,7 @@ Java_com_example_fm_FmNative_initFm(JNIEnv *env, jobject thiz) {
 
     auto nodes = get_candidate_device_nodes();
     for (const auto& node : nodes) {
-        int fd = open(node.c_str(), O_RDWR);
+        int fd = open(node.c_str(), O_RDWR | O_NONBLOCK);
         if (fd >= 0) {
             LOGI("Successfully opened FM device driver node: %s", node.c_str());
             struct v4l2_tuner tuner;
@@ -733,6 +847,11 @@ Java_com_example_fm_FmNative_getRdsData(JNIEnv *env, jobject thiz) {
         if (bytes > 0) {
             LOGI("Read %zd bytes of RDS data from driver", bytes);
             return env->NewStringUTF("Qualcomm RDS Broadcast");
+        } else {
+            if (bytes < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                // No data available right now, return null without blocking the thread
+                return nullptr;
+            }
         }
     }
     return nullptr;
