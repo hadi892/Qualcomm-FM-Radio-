@@ -3,6 +3,8 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.ACCESS_FM" />
+    <uses-permission android:name="com.caf.fmradio.permission.ACCESS_FM_SERVICE" />
 
     <application
         android:allowBackup="true"

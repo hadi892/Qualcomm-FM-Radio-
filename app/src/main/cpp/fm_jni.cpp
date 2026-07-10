@@ -256,9 +256,12 @@ static ElfDependencyInfo analyze_elf_templated(FILE* f, const std::string& path,
         return info;
     }
 
-    if (ehdr.e_phoff > (unsigned long)file_size || 
-        ehdr.e_phnum * sizeof(PhdrT) > (unsigned long)file_size || 
-        ehdr.e_phoff + ehdr.e_phnum * sizeof(PhdrT) > (unsigned long)file_size) {
+    uint64_t phoff = ehdr.e_phoff;
+    uint64_t phnum = ehdr.e_phnum;
+    uint64_t phsize = phnum * sizeof(PhdrT);
+    if (phoff > (uint64_t)file_size || 
+        phsize > (uint64_t)file_size || 
+        phoff + phsize > (uint64_t)file_size) {
         info.error = "Program headers exceed file boundary";
         return info;
     }
@@ -285,9 +288,11 @@ static ElfDependencyInfo analyze_elf_templated(FILE* f, const std::string& path,
         return info;
     }
 
-    if (dynamic_phdr->p_offset > (unsigned long)file_size || 
-        dynamic_phdr->p_filesz > (unsigned long)file_size || 
-        dynamic_phdr->p_offset + dynamic_phdr->p_filesz > (unsigned long)file_size) {
+    uint64_t dyn_offset = dynamic_phdr->p_offset;
+    uint64_t dyn_filesz = dynamic_phdr->p_filesz;
+    if (dyn_offset > (uint64_t)file_size || 
+        dyn_filesz > (uint64_t)file_size || 
+        dyn_offset + dyn_filesz > (uint64_t)file_size) {
         info.error = "Dynamic segment exceeds file boundary";
         return info;
     }
@@ -449,44 +454,36 @@ public:
 
         std::vector<std::string> search_paths = {
             "/vendor/lib64", "/vendor/lib",
-            "/system/lib64", "/system/lib",
-            "/system_ext/lib64", "/odm/lib64", "/product/lib64"
-        };
-
-        std::vector<std::string> target_patterns = {
-            "vendor.qti.hardware.fm@1.0.so",
-            "vendor.qti.hardware.fm@1.0-impl.so",
-            "libfmpal.so"
+            "/odm/lib64", "/odm/lib",
+            "/system_ext/lib64", "/system_ext/lib"
         };
 
         LOGI("Searching recursively for Qualcomm FM HAL libraries...");
         for (const auto& dir : search_paths) {
-            for (const auto& pattern : target_patterns) {
-                std::vector<std::string> matches;
-                scan_dir_recursive(dir, pattern, matches);
-                for (const auto& path : matches) {
-                    LOGI("Attempting dlopen on: %s", path.c_str());
-                    void* handle = dlopen(path.c_str(), RTLD_NOW);
-                    if (handle) {
-                        LOGI("Successfully loaded HAL library: %s", path.c_str());
-                        hal_.handle = handle;
-                        hal_.loaded_path = path;
-                        hal_.power_up = (fm_power_up_t)dlsym(handle, "fmpal_power_up");
-                        hal_.power_down = (fm_power_down_t)dlsym(handle, "fmpal_power_down");
-                        hal_.tune = (fm_tune_t)dlsym(handle, "fmpal_tune");
-                        hal_.seek = (fm_seek_t)dlsym(handle, "fmpal_seek");
-                        hal_.get_rssi = (fm_get_rssi_t)dlsym(handle, "fmpal_get_rssi");
+            std::vector<std::string> matches;
+            scan_dir_recursive(dir, "", matches);
+            for (const auto& path : matches) {
+                LOGI("Attempting dlopen on: %s", path.c_str());
+                void* handle = dlopen(path.c_str(), RTLD_NOW);
+                if (handle) {
+                    LOGI("Successfully loaded HAL library: %s", path.c_str());
+                    hal_.handle = handle;
+                    hal_.loaded_path = path;
+                    hal_.power_up = (fm_power_up_t)dlsym(handle, "fmpal_power_up");
+                    hal_.power_down = (fm_power_down_t)dlsym(handle, "fmpal_power_down");
+                    hal_.tune = (fm_tune_t)dlsym(handle, "fmpal_tune");
+                    hal_.seek = (fm_seek_t)dlsym(handle, "fmpal_seek");
+                    hal_.get_rssi = (fm_get_rssi_t)dlsym(handle, "fmpal_get_rssi");
 
-                        if (hal_.power_up || hal_.tune) {
-                            LOGI("Successfully mapped symbols for FM PAL/HAL in %s", path.c_str());
-                            return true;
-                        } else {
-                            LOGE("Loaded %s but fmpal_power_up or fmpal_tune symbols were missing", path.c_str());
-                            hal_.reset();
-                        }
+                    if (hal_.power_up || hal_.tune) {
+                        LOGI("Successfully mapped symbols for FM PAL/HAL in %s", path.c_str());
+                        return true;
                     } else {
-                        LOGE("Failed to load library: %s (dlerror: %s)", path.c_str(), dlerror());
+                        LOGE("Loaded %s but fmpal_power_up or fmpal_tune symbols were missing", path.c_str());
+                        hal_.reset();
                     }
+                } else {
+                    LOGE("Failed to load library: %s (dlerror: %s)", path.c_str(), dlerror());
                 }
             }
         }
@@ -564,12 +561,17 @@ struct PhdrCallbackData {
 };
 
 static int dl_iterate_phdr_callback(struct dl_phdr_info* info, size_t size, void* data) {
+    if (!info || !data) return 0;
     auto* report_data = static_cast<PhdrCallbackData*>(data);
-    if (info->dlpi_name && strlen(info->dlpi_name) > 0) {
-        std::string name = info->dlpi_name;
-        if (name.find("fm") != std::string::npos || name.find("qti") != std::string::npos || 
-            name.find("broadcastradio") != std::string::npos) {
-            *(report_data->report) += "  -> Loaded: " + name + " (base address: " + std::to_string(info->dlpi_addr) + ")\n";
+    if (!report_data->report) return 0;
+    if (info->dlpi_name) {
+        const char* name_ptr = info->dlpi_name;
+        if (name_ptr[0] != '\0') {
+            std::string name(name_ptr);
+            if (name.find("fm") != std::string::npos || name.find("qti") != std::string::npos || 
+                name.find("broadcastradio") != std::string::npos) {
+                *(report_data->report) += "  -> Loaded: " + name + " (base address: " + std::to_string(info->dlpi_addr) + ")\n";
+            }
         }
     }
     return 0;
@@ -593,22 +595,15 @@ Java_com_example_fm_FmNative_isHardwareSupported(JNIEnv *env, jobject thiz) {
     // 2. Check if the library files physically exist, even if we can't dlopen them from untrusted app namespace
     std::vector<std::string> search_paths = {
         "/vendor/lib64", "/vendor/lib",
-        "/system/lib64", "/system/lib",
-        "/system_ext/lib64", "/odm/lib64", "/product/lib64"
-    };
-    std::vector<std::string> target_patterns = {
-        "vendor.qti.hardware.fm@1.0.so",
-        "vendor.qti.hardware.fm@1.0-impl.so",
-        "libfmpal.so"
+        "/odm/lib64", "/odm/lib",
+        "/system_ext/lib64", "/system_ext/lib"
     };
     for (const auto& dir : search_paths) {
-        for (const auto& pattern : target_patterns) {
-            std::vector<std::string> matches;
-            scan_dir_recursive(dir, pattern, matches);
-            if (!matches.empty()) {
-                LOGI("Hardware support detected: Qualcomm FM HAL libraries found on disk in %s!", dir.c_str());
-                return JNI_TRUE;
-            }
+        std::vector<std::string> matches;
+        scan_dir_recursive(dir, "", matches);
+        if (!matches.empty()) {
+            LOGI("Hardware support detected: Qualcomm FM HAL libraries found on disk in %s!", dir.c_str());
+            return JNI_TRUE;
         }
     }
 
@@ -948,10 +943,8 @@ Java_com_example_fm_FmNative_getDiagnosticsReport(JNIEnv *env, jobject thiz) {
     report += "=== STAGE 2: PARTITION SHARED LIBRARY SEARCH ===\n";
     std::vector<std::string> search_dirs = {
         "/vendor/lib64", "/vendor/lib",
-        "/system/lib64", "/system/lib",
-        "/system_ext/lib64", "/system_ext/lib",
         "/odm/lib64", "/odm/lib",
-        "/product/lib64", "/product/lib"
+        "/system_ext/lib64", "/system_ext/lib"
     };
     std::vector<std::string> discovered_libs;
     bool lib_exists = false;
