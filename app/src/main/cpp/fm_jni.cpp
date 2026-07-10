@@ -154,12 +154,14 @@ static void scan_dir_recursive(const std::string& path_str, const std::string& p
         if (!fs::exists(path) || !fs::is_directory(path)) return;
         
         auto iter = fs::recursive_directory_iterator(path, fs::directory_options::skip_permission_denied);
-        for (const auto& entry : iter) {
+        auto end_iter = fs::recursive_directory_iterator();
+        while (iter != end_iter) {
             try {
                 if (iter.depth() > 2) {
                     iter.pop();
                     continue;
                 }
+                const auto& entry = *iter;
                 if (entry.is_regular_file()) {
                     std::string filename = entry.path().filename().string();
                     std::string path_string = entry.path().string();
@@ -180,7 +182,14 @@ static void scan_dir_recursive(const std::string& path_str, const std::string& p
                         }
                     }
                 }
-            } catch (...) {}
+                ++iter;
+            } catch (...) {
+                try {
+                    ++iter;
+                } catch (...) {
+                    break;
+                }
+            }
         }
     } catch (...) {}
 }
