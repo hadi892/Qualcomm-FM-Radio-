@@ -33,6 +33,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Cancel
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeveloperMode
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FastRewind
@@ -1022,10 +1024,18 @@ fun IndividualDiagnosticsPanel(
     diagnosticsReport: String,
     onRefresh: () -> Unit
 ) {
-    val hasDriverNode = diagnosticsReport.contains("[FOUND & ACCESSIBLE (OK)]")
-    val hasPermissionDenied = diagnosticsReport.contains("Permission Denied") || diagnosticsReport.contains("ACCESS FAILED (errno: 13")
-    val hasHalLib = diagnosticsReport.contains("dlopen: SUCCESS")
-    val hasBinderSvc = diagnosticsReport.contains("Found Binder Service:")
+    val stage1 = diagnosticsReport.contains("Stage 1 - QTI FM Library Exists: YES")
+    val stage2 = diagnosticsReport.contains("Stage 2 - QTI FM Library Loaded (dlopen): YES")
+    val stage3 = diagnosticsReport.contains("Stage 3 - Binder FM Service Connected: YES")
+    val stage4 = diagnosticsReport.contains("Stage 4 - Kernel Driver Node Opened: YES")
+    val stage5 = diagnosticsReport.contains("Stage 5 - Vendor Audio Routing Ready: YES")
+    val stage6 = diagnosticsReport.contains("Stage 6 - Qualcomm FM Interface Ready: YES")
+
+    // Node checks from reports
+    val hasDriverNode = diagnosticsReport.contains("[PRESENT]")
+    val hasPermissionDenied = diagnosticsReport.contains("Permission Denied") || 
+            diagnosticsReport.contains("ACCESS FAILED (errno: 13") ||
+            diagnosticsReport.contains("SELinux Denied")
 
     val platformPlatform = diagnosticsReport.lines()
         .firstOrNull { it.startsWith("ro.board.platform:") }
@@ -1044,7 +1054,7 @@ fun IndividualDiagnosticsPanel(
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1080,42 +1090,84 @@ fun IndividualDiagnosticsPanel(
 
             HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
 
-            // 1. Kernel Driver Node Status
+            // Six Discrete Hardware Resolution Stages
+            Text(
+                text = "Hardware Detection Stages",
+                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                color = MaterialTheme.colorScheme.primary
+            )
+
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                HardwareStageRow(label = "1. FM Library Exists", active = stage1)
+                HardwareStageRow(label = "2. FM Library Loaded (dlopen)", active = stage2)
+                HardwareStageRow(label = "3. Binder FM Service Connected", active = stage3)
+                HardwareStageRow(label = "4. Kernel Driver Node Opened", active = stage4)
+                HardwareStageRow(label = "5. Vendor Audio Routing Ready", active = stage5)
+                HardwareStageRow(label = "6. Qualcomm FM Interface Ready", active = stage6)
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+
+            // Lower Detail Items
+            Text(
+                text = "Detailed System Environment",
+                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                color = MaterialTheme.colorScheme.primary
+            )
+
             DiagnosticStatusRow(
                 label = "V4L2 Tuner Node (/dev/radio0)",
                 statusText = when {
-                    hasDriverNode -> "Accessible"
-                    hasPermissionDenied -> "SELinux Block"
+                    stage4 -> "Opened"
+                    hasDriverNode && hasPermissionDenied -> "SELinux Block / Permission Denied"
+                    hasDriverNode -> "Present (Closed)"
                     else -> "Missing"
                 },
                 statusType = when {
-                    hasDriverNode -> DiagnosticStatusType.SUCCESS
-                    hasPermissionDenied -> DiagnosticStatusType.WARNING
+                    stage4 -> DiagnosticStatusType.SUCCESS
+                    hasDriverNode && hasPermissionDenied -> DiagnosticStatusType.WARNING
+                    hasDriverNode -> DiagnosticStatusType.INFO
                     else -> DiagnosticStatusType.ERROR
                 }
             )
 
-            // 2. HAL Shared Library Status
             DiagnosticStatusRow(
-                label = "FM HAL (libfmpal.so)",
-                statusText = if (hasHalLib) "Loaded" else "Missing",
-                statusType = if (hasHalLib) DiagnosticStatusType.SUCCESS else DiagnosticStatusType.ERROR
-            )
-
-            // 3. Binder Service Status
-            DiagnosticStatusRow(
-                label = "Binder FM Service",
-                statusText = if (hasBinderSvc) "Registered" else "Not Registered",
-                statusType = if (hasBinderSvc) DiagnosticStatusType.SUCCESS else DiagnosticStatusType.ERROR
-            )
-
-            // 4. Board Platform SoC
-            DiagnosticStatusRow(
-                label = "Soc Board Platform",
+                label = "Board Platform SoC",
                 statusText = "$platformPlatform ($modelName)",
                 statusType = if (platformPlatform != "UNKNOWN/NOT_SET" && platformPlatform != "UNKNOWN") DiagnosticStatusType.INFO else DiagnosticStatusType.WARNING
             )
         }
+    }
+}
+
+@Composable
+fun HardwareStageRow(label: String, active: Boolean) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(
+                if (active) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f)
+                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.1f)
+            )
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+            color = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+        )
+        Icon(
+            imageVector = if (active) Icons.Default.CheckCircle else Icons.Default.Cancel,
+            contentDescription = if (active) "Ready" else "Not Ready",
+            tint = if (active) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
+            modifier = Modifier.size(18.dp)
+        )
     }
 }
 
