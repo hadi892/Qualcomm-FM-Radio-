@@ -16,6 +16,8 @@
 #include <memory>
 #include <elf.h>
 #include <link.h>
+#include <filesystem>
+#include <sys/utsname.h>
 
 #define LOG_TAG "FM_JNI_HAL"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -126,55 +128,57 @@ static std::string run_shell_command(const std::string& cmd) {
     return result;
 }
 
+namespace fs = std::filesystem;
+
 // Recursive directory scanning for target library files
-static void scan_dir_recursive(const std::string& path, const std::string& pattern, std::vector<std::string>& results, int depth = 0) {
-    if (depth > 4) return; // Prevent infinite recursion
-    DIR* dir = opendir(path.c_str());
-    if (!dir) return;
-
-    struct dirent* entry;
-    while ((entry = readdir(dir)) != nullptr) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
-        std::string full_path = path;
-        if (full_path.back() != '/') {
-            full_path += "/";
-        }
-        full_path += entry->d_name;
-
-        struct stat st;
-        if (stat(full_path.c_str(), &st) == 0) {
-            if (S_ISDIR(st.st_mode)) {
-                scan_dir_recursive(full_path, pattern, results, depth + 1);
-            } else if (S_ISREG(st.st_mode)) {
-                if (full_path.find(pattern) != std::string::npos) {
-                    results.push_back(full_path);
+static void scan_dir_recursive(const std::string& path_str, const std::string& pattern, std::vector<std::string>& results) {
+    try {
+        fs::path path(path_str);
+        if (!fs::exists(path) || !fs::is_directory(path)) return;
+        
+        for (const auto& entry : fs::recursive_directory_iterator(path, fs::directory_options::skip_permission_denied)) {
+            try {
+                if (entry.is_regular_file()) {
+                    std::string filename = entry.path().filename().string();
+                    std::string path_string = entry.path().string();
+                    
+                    if (pattern.empty()) {
+                        // General matching for targets
+                        if (filename == "vendor.qti.hardware.fm@1.0.so" ||
+                            filename == "vendor.qti.hardware.fm@1.0-impl.so" ||
+                            filename == "libfmpal.so" ||
+                            (filename.rfind("libqcomfm", 0) == 0 && filename.size() > 3 && filename.substr(filename.size() - 3) == ".so") ||
+                            (filename.rfind("libfm", 0) == 0 && filename.size() > 3 && filename.substr(filename.size() - 3) == ".so")) {
+                            results.push_back(path_string);
+                        }
+                    } else {
+                        // Substring matching
+                        if (filename.find(pattern) != std::string::npos) {
+                            results.push_back(path_string);
+                        }
+                    }
                 }
-            }
+            } catch (...) {}
         }
-    }
-    closedir(dir);
+    } catch (...) {}
 }
 
 // Scanning possible driver nodes in /dev
 static std::vector<std::string> get_candidate_device_nodes() {
     std::vector<std::string> nodes;
-    DIR* dir = opendir("/dev");
-    if (dir) {
-        struct dirent* entry;
-        while ((entry = readdir(dir)) != nullptr) {
-            std::string name = entry->d_name;
-            // Check matching Qualcomm, iris, video, or v4l radio nodes
-            if (name.find("radio") == 0 || name.find("fm") == 0 || name.find("iris") == 0 ||
-                name.find("video") == 0 || name.find("v4l") == 0 || name.find("smd") == 0 ||
-                name.find("adsprpc") == 0) {
-                nodes.push_back("/dev/" + name);
+    try {
+        fs::path dev_path("/dev");
+        if (fs::exists(dev_path) && fs::is_directory(dev_path)) {
+            for (const auto& entry : fs::directory_iterator(dev_path)) {
+                std::string name = entry.path().filename().string();
+                if (name.find("radio") == 0 || name.find("fm") == 0 || name.find("iris") == 0 ||
+                    name.find("video") == 0 || name.find("v4l") == 0 || name.find("smd") == 0 ||
+                    name.find("adsprpc") == 0) {
+                    nodes.push_back(entry.path().string());
+                }
             }
         }
-        closedir(dir);
-    }
-    // Fallback if directory reading is restricted
+    } catch (...) {}
     if (nodes.empty()) {
         nodes = {"/dev/radio0", "/dev/fm", "/dev/iris"};
     }
@@ -184,9 +188,23 @@ static std::vector<std::string> get_candidate_device_nodes() {
 // ELF Dependency Reader structure & logic
 struct ElfDependencyInfo {
     std::string lib_name;
+    bool valid = false;
+    bool is_64bit = false;
+    std::string architecture = "Unknown";
+    std::string soname = "";
     std::vector<std::string> needed_libs;
     std::string error;
 };
+
+static std::string get_elf_machine_name(uint16_t machine) {
+    switch (machine) {
+        case 3: return "x86 (Intel 386)";
+        case 40: return "ARM 32-bit";
+        case 62: return "x86_64 (64-bit Intel)";
+        case 183: return "AArch64 (ARM 64-bit)";
+        default: return "Unknown (" + std::to_string(machine) + ")";
+    }
+}
 
 static ElfDependencyInfo analyze_elf_dependencies(const std::string& path) {
     ElfDependencyInfo info;
@@ -212,7 +230,9 @@ static ElfDependencyInfo analyze_elf_dependencies(const std::string& path) {
         return info;
     }
 
+    info.valid = true;
     unsigned char elf_class = ident[EI_CLASS];
+    info.is_64bit = (elf_class == ELFCLASS64);
     fseek(f, 0, SEEK_SET);
 
     if (elf_class == ELFCLASS64) {
@@ -222,6 +242,8 @@ static ElfDependencyInfo analyze_elf_dependencies(const std::string& path) {
             fclose(f);
             return info;
         }
+
+        info.architecture = get_elf_machine_name(ehdr.e_machine);
 
         std::vector<Elf64_Phdr> phdrs(ehdr.e_phnum);
         fseek(f, ehdr.e_phoff, SEEK_SET);
@@ -257,12 +279,15 @@ static ElfDependencyInfo analyze_elf_dependencies(const std::string& path) {
         }
 
         uint64_t strtab_va = 0;
+        uint64_t soname_offset = 0;
         std::vector<uint64_t> needed_offsets;
         for (const auto& dyn : dyns) {
             if (dyn.d_tag == DT_STRTAB) {
                 strtab_va = dyn.d_un.d_ptr;
             } else if (dyn.d_tag == DT_NEEDED) {
                 needed_offsets.push_back(dyn.d_un.d_val);
+            } else if (dyn.d_tag == DT_SONAME) {
+                soname_offset = dyn.d_un.d_val;
             }
         }
 
@@ -288,6 +313,14 @@ static ElfDependencyInfo analyze_elf_dependencies(const std::string& path) {
             return info;
         }
 
+        if (soname_offset != 0) {
+            fseek(f, strtab_offset + soname_offset, SEEK_SET);
+            char c;
+            while (fread(&c, 1, 1, f) == 1 && c != '\0') {
+                info.soname += c;
+            }
+        }
+
         for (auto offset : needed_offsets) {
             fseek(f, strtab_offset + offset, SEEK_SET);
             std::string needed_lib;
@@ -306,6 +339,8 @@ static ElfDependencyInfo analyze_elf_dependencies(const std::string& path) {
             fclose(f);
             return info;
         }
+
+        info.architecture = get_elf_machine_name(ehdr.e_machine);
 
         std::vector<Elf32_Phdr> phdrs(ehdr.e_phnum);
         fseek(f, ehdr.e_phoff, SEEK_SET);
@@ -341,12 +376,15 @@ static ElfDependencyInfo analyze_elf_dependencies(const std::string& path) {
         }
 
         uint32_t strtab_va = 0;
+        uint32_t soname_offset = 0;
         std::vector<uint32_t> needed_offsets;
         for (const auto& dyn : dyns) {
             if (dyn.d_tag == DT_STRTAB) {
                 strtab_va = dyn.d_un.d_ptr;
             } else if (dyn.d_tag == DT_NEEDED) {
                 needed_offsets.push_back(dyn.d_un.d_val);
+            } else if (dyn.d_tag == DT_SONAME) {
+                soname_offset = dyn.d_un.d_val;
             }
         }
 
@@ -370,6 +408,14 @@ static ElfDependencyInfo analyze_elf_dependencies(const std::string& path) {
             info.error = "Failed to translate DT_STRTAB virtual address to file offset";
             fclose(f);
             return info;
+        }
+
+        if (soname_offset != 0) {
+            fseek(f, strtab_offset + soname_offset, SEEK_SET);
+            char c;
+            while (fread(&c, 1, 1, f) == 1 && c != '\0') {
+                info.soname += c;
+            }
         }
 
         for (auto offset : needed_offsets) {
@@ -866,56 +912,113 @@ Java_com_example_fm_FmNative_getDiagnosticsReport(JNIEnv *env, jobject thiz) {
     LOGI("Generating full high-resolution FM hardware diagnostics report...");
     std::string report;
 
-    // 1. SYSTEM & SELINUX ATTRIBUTES
-    report += "=== SYSTEM & SECURITY CONTROLS ===\n";
-    report += "ro.board.platform: " + get_system_property("ro.board.platform") + "\n";
-    report += "ro.hardware: " + get_system_property("ro.hardware") + "\n";
-    report += "ro.boot.hardware: " + get_system_property("ro.boot.hardware") + "\n";
-    report += "ro.product.model: " + get_system_property("ro.product.model") + "\n";
-    report += "ro.product.device: " + get_system_property("ro.product.device") + "\n";
-    report += "ro.vendor.qti.fm: " + get_system_property("ro.vendor.qti.fm") + "\n";
-    report += "ro.fm.active: " + get_system_property("ro.fm.active") + "\n";
-    report += "vendor.hw.fm: " + get_system_property("vendor.hw.fm") + "\n";
+    // Stage 1: CPU, Board, Model, OS, Kernel Version, ABI
+    report += "=== STAGE 1: SYSTEM & CPU PLATFORM ===\n";
+    struct utsname sys_info;
+    std::string kernel_version = "UNKNOWN";
+    if (uname(&sys_info) == 0) {
+        kernel_version = std::string(sys_info.sysname) + " " + sys_info.release + " " + sys_info.version;
+    }
+    report += "Platform (ro.board.platform): " + get_system_property("ro.board.platform") + "\n";
+    report += "Board (ro.product.board): " + get_system_property("ro.product.board") + "\n";
+    report += "Model (ro.product.model): " + get_system_property("ro.product.model") + "\n";
+    report += "Android Version (ro.build.version.release): " + get_system_property("ro.build.version.release") + "\n";
+    report += "Kernel Version: " + kernel_version + "\n";
+    report += "ABI (ro.product.cpu.abi): " + get_system_property("ro.product.cpu.abi") + "\n";
     report += "SELinux Mode: " + check_selinux_status() + "\n";
-    report += "App Security Domain: " + get_selinux_context() + "\n";
+    report += "App Security Domain: " + get_selinux_context() + "\n\n";
 
-    // 2. STAGED RESOLUTION MATRIX
-    report += "\n=== STAGED FM RESOLUTION MATRIX ===\n";
-    
-    // Evaluate Stage 1: Library Exists
+    // Stage 2: Partition Shared Library Search
+    report += "=== STAGE 2: PARTITION SHARED LIBRARY SEARCH ===\n";
     std::vector<std::string> search_dirs = {
-        "/vendor/lib64", "/vendor/lib",
-        "/system/lib64", "/system/lib",
-        "/system_ext/lib64", "/odm/lib64", "/product/lib64"
+        "/vendor", "/system", "/system_ext", "/product", "/odm", "/apex"
     };
-    std::vector<std::string> targets = {
-        "vendor.qti.hardware.fm@1.0.so",
-        "vendor.qti.hardware.fm@1.0-impl.so",
-        "libfmpal.so"
-    };
+    std::vector<std::string> discovered_libs;
     bool lib_exists = false;
-    bool lib_loaded = false;
     for (const auto& dir : search_dirs) {
-        for (const auto& target : targets) {
-            std::vector<std::string> matches;
-            scan_dir_recursive(dir, target, matches);
-            if (!matches.empty()) {
-                lib_exists = true;
-                for (const auto& path : matches) {
-                    void* h = dlopen(path.c_str(), RTLD_NOW);
-                    if (h) {
-                        lib_loaded = true;
-                        dlclose(h);
-                        break;
-                    }
-                }
-            }
+        std::vector<std::string> dir_results;
+        scan_dir_recursive(dir, "", dir_results); // pattern empty means scan all targets
+        report += "Search in " + dir + ": " + (dir_results.empty() ? "NOT FOUND" : "FOUND") + "\n";
+        for (const auto& lib_path : dir_results) {
+            report += "  -> " + lib_path + "\n";
+            discovered_libs.push_back(lib_path);
+            lib_exists = true;
         }
     }
-    report += std::string("Stage 1 - QTI FM Library Exists: ") + (lib_exists ? "YES" : "NO") + "\n";
-    report += std::string("Stage 2 - QTI FM Library Loaded (dlopen): ") + (lib_loaded ? "YES" : "NO") + "\n";
+    report += "\n";
 
-    // Evaluate Stage 3: Binder Connection
+    // Stage 3: Shared Library Attribute & Metadata Inspection
+    report += "=== STAGE 3: SHARED LIBRARY ATTRIBUTES & METADATA ===\n";
+    for (const auto& path : discovered_libs) {
+        report += "Library: " + path + "\n";
+        struct stat st;
+        bool exists = (stat(path.c_str(), &st) == 0);
+        report += std::string("  -> File Exists: ") + (exists ? "YES" : "NO") + "\n";
+        
+        FILE* test_read = fopen(path.c_str(), "rb");
+        bool readable = (test_read != nullptr);
+        if (test_read) fclose(test_read);
+        report += std::string("  -> Readable: ") + (readable ? "YES" : "NO") + "\n";
+
+        auto elf_info = analyze_elf_dependencies(path);
+        if (elf_info.valid) {
+            report += "  -> ELF Valid: YES\n";
+            report += "  -> Class: " + std::string(elf_info.is_64bit ? "64-bit" : "32-bit") + "\n";
+            report += "  -> Architecture: " + elf_info.architecture + "\n";
+            report += "  -> SONAME: " + (elf_info.soname.empty() ? "None" : elf_info.soname) + "\n";
+        } else {
+            report += "  -> ELF Valid: NO (" + elf_info.error + ")\n";
+        }
+    }
+    report += "\n";
+
+    // Stage 4: Attempt dlopen()
+    report += "=== STAGE 4: DYNAMIC LOADING (dlopen) ===\n";
+    bool lib_loaded = false;
+    for (const auto& path : discovered_libs) {
+        void* handle = dlopen(path.c_str(), RTLD_NOW);
+        if (handle) {
+            report += "Library: " + path + " -> dlopen: SUCCESS\n";
+            lib_loaded = true;
+            dlclose(handle);
+        } else {
+            const char* err = dlerror();
+            report += "Library: " + path + " -> dlopen: FAILED\n";
+            report += "  -> dlerror: " + std::string(err ? err : "Unknown dlerror") + "\n";
+        }
+    }
+    report += "\n";
+
+    // Stage 5: Resolve symbols using dlsym()
+    report += "=== STAGE 5: SYMBOL RESOLUTION (dlsym) ===\n";
+    bool symbols_resolved = false;
+    for (const auto& path : discovered_libs) {
+        void* handle = dlopen(path.c_str(), RTLD_NOW);
+        if (handle) {
+            report += "Library: " + path + "\n";
+            std::vector<std::string> symbols = {"fmpal_power_up", "fmpal_power_down", "fmpal_tune", "fmpal_seek", "fmpal_get_rssi"};
+            int resolved_count = 0;
+            for (const auto& sym : symbols) {
+                void* sym_ptr = dlsym(handle, sym.c_str());
+                if (sym_ptr) {
+                    report += "  -> " + sym + ": SUCCESS\n";
+                    resolved_count++;
+                } else {
+                    report += "  -> " + sym + ": FAILED\n";
+                }
+            }
+            if (resolved_count == (int)symbols.size()) {
+                symbols_resolved = true;
+            }
+            dlclose(handle);
+        } else {
+            report += "Library: " + path + " -> Skipped (Could not dlopen)\n";
+        }
+    }
+    report += "\n";
+
+    // Stage 6: Search Binder services
+    report += "=== STAGE 6: BINDER SERVICES ENUMERATION ===\n";
     std::string service_output = run_shell_command("service list");
     bool binder_connected = false;
     std::vector<std::string> patterns = {"broadcastradio", "fm", "qti.hardware.fm"};
@@ -924,110 +1027,193 @@ Java_com_example_fm_FmNative_getDiagnosticsReport(JNIEnv *env, jobject thiz) {
     while (std::getline(ss, line)) {
         for (const auto& p : patterns) {
             if (line.find(p) != std::string::npos) {
+                report += "  -> Registered Service: " + line + "\n";
                 binder_connected = true;
                 break;
             }
         }
     }
-    report += std::string("Stage 3 - Binder FM Service Connected: ") + (binder_connected ? "YES" : "NO") + "\n";
+    if (!binder_connected) {
+        report += "  -> No registered broadcastradio, fm, or qti.hardware.fm Binder services discovered.\n";
+    }
+    report += "\n";
 
-    // Evaluate Stage 4: Driver Opened
+    // Stage 7: Search every device node
+    report += "=== STAGE 7: KERNEL DEVICE NODES ===\n";
+    auto dev_nodes = get_candidate_device_nodes();
+    bool node_exists = false;
     bool driver_opened = g_radio_fd.is_valid();
-    if (!driver_opened) {
-        auto nodes = get_candidate_device_nodes();
-        for (const auto& node : nodes) {
+    for (const auto& node : dev_nodes) {
+        struct stat st;
+        if (stat(node.c_str(), &st) == 0) {
+            node_exists = true;
+            report += "Node: " + node + " [Exists]\n";
+            char perm_str[10];
+            snprintf(perm_str, sizeof(perm_str), "%o", st.st_mode & 0777);
+            report += "  -> DAC Permissions: " + std::string(perm_str) + " (UID: " + std::to_string(st.st_uid) + ", GID: " + std::to_string(st.st_gid) + ")\n";
             int fd = open(node.c_str(), O_RDONLY);
             if (fd >= 0) {
+                report += "  -> Accessibility: Open SUCCESS (O_RDONLY)\n";
                 driver_opened = true;
                 close(fd);
-                break;
+            } else {
+                int err = errno;
+                report += "  -> Accessibility: Open FAILED (errno: " + std::to_string(err) + " - " + strerror(err) + ")\n";
             }
         }
     }
-    report += std::string("Stage 4 - Kernel Driver Node Opened: ") + (driver_opened ? "YES" : "NO") + "\n";
+    report += "\n";
 
-    // Evaluate Stage 5: Audio Path Ready
-    std::string audio_prop = get_system_property("ro.vendor.audio.sdk");
-    bool audio_path_ready = (audio_prop != "UNKNOWN/NOT_SET") || (get_system_property("vendor.audio.feature.fm.rx.enabled") == "true");
-    report += std::string("Stage 5 - Vendor Audio Routing Ready: ") + (audio_path_ready ? "YES" : "NO") + "\n";
-
-    // Evaluate Stage 6: FM Ready
-    bool fm_ready = (lib_loaded || driver_opened);
-    report += std::string("Stage 6 - Qualcomm FM Interface Ready: ") + (fm_ready ? "YES" : "NO") + "\n";
-
-    // 3. DEVICE NODE INSPECTOR & DAC/MAC STATUS
-    report += "\n=== KERNEL DEVICE NODE DIAGNOSTICS ===\n";
-    auto nodes = get_candidate_device_nodes();
-    for (const auto& node : nodes) {
-        auto diag = diagnose_device_node(node);
-        if (diag.exists) {
-            report += "Node: " + diag.path + " [PRESENT]\n";
-            report += "  -> Linux DAC Permissions: " + diag.dac_permissions + "\n";
-            report += "  -> Driver Accessibility: " + diag.error_detail + "\n";
-            report += "  -> Restriction Classification: " + diag.restriction_category + "\n";
-        } else {
-            report += "Node: " + diag.path + " [ABSENT] (" + diag.error_detail + ")\n";
+    // Stage 8: Determine WHY access failed (Failure Analysis)
+    report += "=== STAGE 8: ACCESS FAILURE ANALYSIS ===\n";
+    bool any_denial = false;
+    for (const auto& node : dev_nodes) {
+        struct stat st;
+        if (stat(node.c_str(), &st) == 0) {
+            int fd = open(node.c_str(), O_RDONLY);
+            if (fd < 0) {
+                any_denial = true;
+                int err = errno;
+                if (err == EACCES) {
+                    bool dac_allows_world = (st.st_mode & 0004) == 0004;
+                    if (!dac_allows_world) {
+                        report += "Node: " + node + " -> Access failed: Permission Denied [DAC]\n";
+                        report += "  -> Cause: Group/Owner permissions restrict process access.\n";
+                    } else {
+                        report += "Node: " + node + " -> Access failed: Permission Denied [MAC/SELinux]\n";
+                        report += "  -> Cause: Enforcing SELinux policy blocks untrusted_app domain from /dev access.\n";
+                    }
+                } else {
+                    report += "Node: " + node + " -> Access failed: " + strerror(err) + " [Kernel Restriction]\n";
+                }
+            }
         }
     }
+    if (!node_exists) {
+        report += "  -> Driver Missing: No tuner/radio device nodes found in /dev.\n";
+    } else if (!any_denial) {
+        report += "  -> All discovered device nodes are readable.\n";
+    }
+    report += "\n";
 
-    // 4. DEPENDENCY & NAMESPACE ANALYZER
-    report += "\n=== COGNITIVE DEPENDENCY & NAMESPACE ANALYZER ===\n";
-    bool hal_found = false;
-    for (const auto& dir : search_dirs) {
-        for (const auto& target : targets) {
-            std::vector<std::string> matches;
-            scan_dir_recursive(dir, target, matches);
-            for (const auto& path : matches) {
-                hal_found = true;
-                auto diag = diagnose_library(path);
-                report += "Library: " + diag.path + " [FOUND]\n";
-                report += std::string("  -> Dynamic Load (dlopen): ") + (diag.loaded ? "SUCCESS" : "FAILED") + "\n";
-                if (!diag.loaded) {
-                    report += "  -> Exact dlerror() string: " + diag.dlerror_msg + "\n";
-                    report += "  -> Failure Classification: " + diag.failure_reason + "\n";
+    // Stage 9: Inspect Android Linker Namespaces
+    report += "=== STAGE 9: LINKER NAMESPACE INSPECTION ===\n";
+    bool namespace_isolated = false;
+    for (const auto& path : discovered_libs) {
+        void* h = dlopen(path.c_str(), RTLD_NOW);
+        if (!h) {
+            std::string err_str = dlerror() ? dlerror() : "";
+            if (err_str.find("namespace") != std::string::npos ||
+                err_str.find("not accessible") != std::string::npos ||
+                err_str.find("restricted") != std::string::npos) {
+                report += "Library: " + path + "\n";
+                report += "  -> Linker Namespace Blocked: YES\n";
+                report += "  -> Reason: Treble dynamic linker isolation prevents loading vendor/system libraries directly into untrusted apps.\n";
+                namespace_isolated = true;
+            }
+        } else {
+            dlclose(h);
+        }
+    }
+    if (!namespace_isolated) {
+        report += "  -> Linker Namespace isolate block not detected directly on candidate libraries.\n";
+    }
+    report += "\n";
+
+    // Stage 10: Dependency/Import Inspection
+    report += "=== STAGE 10: DEPENDENCY & IMPORT INSPECTION ===\n";
+    for (const auto& path : discovered_libs) {
+        report += "Library: " + path + "\n";
+        auto elf_info = analyze_elf_dependencies(path);
+        if (elf_info.valid) {
+            bool broken = false;
+            for (const auto& dep : elf_info.needed_libs) {
+                std::vector<std::string> search_dirs_dep;
+                if (elf_info.is_64bit) {
+                    search_dirs_dep = {"/vendor/lib64", "/system/lib64", "/system_ext/lib64", "/odm/lib64", "/product/lib64"};
+                } else {
+                    search_dirs_dep = {"/vendor/lib", "/system/lib", "/system_ext/lib", "/odm/lib", "/product/lib"};
                 }
-                if (!diag.dependencies.empty()) {
-                    report += "  -> Parsed ELF Dynamic DT_NEEDED list:\n";
-                    for (const auto& dep : diag.dependencies) {
-                        bool missing = false;
-                        for (const auto& m : diag.missing_dependencies) {
-                            if (m == dep) {
-                                missing = true;
-                                break;
-                            }
-                        }
-                        report += "     * " + dep + (missing ? " [MISSING FROM DEVICE]" : " [RESOLVED]") + "\n";
+                bool found = false;
+                for (const auto& d : search_dirs_dep) {
+                    struct stat dep_st;
+                    if (stat((d + "/" + dep).c_str(), &dep_st) == 0) {
+                        found = true;
+                        break;
                     }
                 }
+                report += "  -> Import: " + dep + (found ? " [OK]" : " [BROKEN / MISSING]") + "\n";
+                if (!found) broken = true;
             }
+            report += std::string("  -> Dependency Chain: ") + (broken ? "BROKEN" : "INTACT") + "\n";
+        } else {
+            report += "  -> Failed to analyze dependencies: " + elf_info.error + "\n";
         }
     }
-    if (!hal_found) {
-        report += "No Qualcomm FM HAL libraries discovered in standard system partitions.\n";
-    }
+    report += "\n";
 
-    // 5. ENUMERATED BINDER SERVICES
-    report += "\n=== ACTIVE BINDER SERVICES LIST ===\n";
-    bool svc_found = false;
-    std::stringstream ss2(service_output);
-    while (std::getline(ss2, line)) {
-        for (const auto& p : patterns) {
-            if (line.find(p) != std::string::npos) {
-                report += "  -> Registered Service: " + line + "\n";
-                svc_found = true;
-                break;
-            }
-        }
-    }
-    if (!svc_found) {
-        report += "No BroadcastRadio or FM Binder services found in active service manager list.\n";
-    }
-
-    // 6. PROCESS MAPPED SHARED LIBRARIES (dl_iterate_phdr)
-    report += "\n=== DYNAMICALLY MAPPED LIBRARIES IN MEMORY (dl_iterate_phdr) ===\n";
+    // Process mapped libraries (dl_iterate_phdr)
+    report += "=== PROCESS MAPPED SHARED LIBRARIES (dl_iterate_phdr) ===\n";
     PhdrCallbackData phdr_data;
     phdr_data.report = &report;
     dl_iterate_phdr(dl_iterate_phdr_callback, &phdr_data);
+    report += "\n";
+
+    // Compute status states
+    std::string state_lib_found = "RED";
+    if (lib_exists) {
+        state_lib_found = "GREEN";
+    }
+
+    std::string state_lib_loaded = "RED";
+    if (lib_loaded) {
+        state_lib_loaded = "GREEN";
+    } else if (lib_exists) {
+        state_lib_loaded = "YELLOW";
+    }
+
+    std::string state_symbols_resolved = "RED";
+    if (symbols_resolved) {
+        state_symbols_resolved = "GREEN";
+    } else if (lib_loaded) {
+        state_symbols_resolved = "YELLOW";
+    }
+
+    std::string state_binder_connected = "RED";
+    if (binder_connected) {
+        state_binder_connected = "GREEN";
+    }
+
+    std::string state_kernel_driver = "RED";
+    if (driver_opened) {
+        state_kernel_driver = "GREEN";
+    } else if (node_exists) {
+        state_kernel_driver = "YELLOW";
+    }
+
+    std::string audio_prop = get_system_property("ro.vendor.audio.sdk");
+    bool audio_path_ready = (audio_prop != "UNKNOWN/NOT_SET") || (get_system_property("vendor.audio.feature.fm.rx.enabled") == "true");
+    std::string state_audio_routing = audio_path_ready ? "GREEN" : "RED";
+
+    bool fm_ready = (lib_loaded || driver_opened);
+    std::string state_fm_interface = fm_ready ? "GREEN" : "RED";
+
+    bool fm_powered = (g_hal.handle != nullptr || g_radio_fd.is_valid());
+    std::string state_fm_powered = fm_powered ? "GREEN" : "RED";
+
+    bool fm_operational = (fm_powered && g_current_freq_khz > 0);
+    std::string state_fm_operational = fm_operational ? "GREEN" : "RED";
+
+    report += "=== STATES ===\n";
+    report += "Library Found: " + state_lib_found + "\n";
+    report += "Library Loaded: " + state_lib_loaded + "\n";
+    report += "Symbols Resolved: " + state_symbols_resolved + "\n";
+    report += "Binder Connected: " + state_binder_connected + "\n";
+    report += "Kernel Driver Ready: " + state_kernel_driver + "\n";
+    report += "Audio Routing Ready: " + state_audio_routing + "\n";
+    report += "FM Interface Ready: " + state_fm_interface + "\n";
+    report += "FM Powered: " + state_fm_powered + "\n";
+    report += "FM Operational: " + state_fm_operational + "\n";
 
     return env->NewStringUTF(report.c_str());
 }

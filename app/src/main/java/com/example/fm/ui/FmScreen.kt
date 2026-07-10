@@ -1019,31 +1019,40 @@ fun DiagnosticStatusRow(
     }
 }
 
+fun parseStateValue(report: String, stateName: String): DiagnosticStatusType {
+    val line = report.lines().firstOrNull { it.trim().startsWith(stateName) }
+    if (line == null) return DiagnosticStatusType.ERROR
+    val value = line.substringAfter(":").trim()
+    return when (value) {
+        "GREEN" -> DiagnosticStatusType.SUCCESS
+        "YELLOW" -> DiagnosticStatusType.WARNING
+        "INFO" -> DiagnosticStatusType.INFO
+        else -> DiagnosticStatusType.ERROR
+    }
+}
+
 @Composable
 fun IndividualDiagnosticsPanel(
     diagnosticsReport: String,
     onRefresh: () -> Unit
 ) {
-    val stage1 = diagnosticsReport.contains("Stage 1 - QTI FM Library Exists: YES")
-    val stage2 = diagnosticsReport.contains("Stage 2 - QTI FM Library Loaded (dlopen): YES")
-    val stage3 = diagnosticsReport.contains("Stage 3 - Binder FM Service Connected: YES")
-    val stage4 = diagnosticsReport.contains("Stage 4 - Kernel Driver Node Opened: YES")
-    val stage5 = diagnosticsReport.contains("Stage 5 - Vendor Audio Routing Ready: YES")
-    val stage6 = diagnosticsReport.contains("Stage 6 - Qualcomm FM Interface Ready: YES")
-
-    // Node checks from reports
-    val hasDriverNode = diagnosticsReport.contains("[PRESENT]")
-    val hasPermissionDenied = diagnosticsReport.contains("Permission Denied") || 
-            diagnosticsReport.contains("ACCESS FAILED (errno: 13") ||
-            diagnosticsReport.contains("SELinux Denied")
+    val stateLibFound = parseStateValue(diagnosticsReport, "Library Found")
+    val stateLibLoaded = parseStateValue(diagnosticsReport, "Library Loaded")
+    val stateSymbolsResolved = parseStateValue(diagnosticsReport, "Symbols Resolved")
+    val stateBinderConnected = parseStateValue(diagnosticsReport, "Binder Connected")
+    val stateKernelDriverReady = parseStateValue(diagnosticsReport, "Kernel Driver Ready")
+    val stateAudioRoutingReady = parseStateValue(diagnosticsReport, "Audio Routing Ready")
+    val stateFmInterfaceReady = parseStateValue(diagnosticsReport, "FM Interface Ready")
+    val stateFmPowered = parseStateValue(diagnosticsReport, "FM Powered")
+    val stateFmOperational = parseStateValue(diagnosticsReport, "FM Operational")
 
     val platformPlatform = diagnosticsReport.lines()
-        .firstOrNull { it.startsWith("ro.board.platform:") }
-        ?.substringAfter("ro.board.platform:")?.trim() ?: "UNKNOWN"
+        .firstOrNull { it.startsWith("Platform (ro.board.platform):") }
+        ?.substringAfter("Platform (ro.board.platform):")?.trim() ?: "UNKNOWN"
         
     val modelName = diagnosticsReport.lines()
-        .firstOrNull { it.startsWith("ro.product.model:") }
-        ?.substringAfter("ro.product.model:")?.trim() ?: "UNKNOWN"
+        .firstOrNull { it.startsWith("Model (ro.product.model):") }
+        ?.substringAfter("Model (ro.product.model):")?.trim() ?: "UNKNOWN"
 
     Card(
         colors = CardDefaults.cardColors(
@@ -1090,9 +1099,9 @@ fun IndividualDiagnosticsPanel(
 
             HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
 
-            // Six Discrete Hardware Resolution Stages
+            // Nine Discrete Hardware Resolution States
             Text(
-                text = "Hardware Detection Stages",
+                text = "Hardware Detection States",
                 style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
                 color = MaterialTheme.colorScheme.primary
             )
@@ -1101,12 +1110,15 @@ fun IndividualDiagnosticsPanel(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                HardwareStageRow(label = "1. FM Library Exists", active = stage1)
-                HardwareStageRow(label = "2. FM Library Loaded (dlopen)", active = stage2)
-                HardwareStageRow(label = "3. Binder FM Service Connected", active = stage3)
-                HardwareStageRow(label = "4. Kernel Driver Node Opened", active = stage4)
-                HardwareStageRow(label = "5. Vendor Audio Routing Ready", active = stage5)
-                HardwareStageRow(label = "6. Qualcomm FM Interface Ready", active = stage6)
+                HardwareStateRow(label = "Library Found", status = stateLibFound)
+                HardwareStateRow(label = "Library Loaded", status = stateLibLoaded)
+                HardwareStateRow(label = "Symbols Resolved", status = stateSymbolsResolved)
+                HardwareStateRow(label = "Binder Connected", status = stateBinderConnected)
+                HardwareStateRow(label = "Kernel Driver Ready", status = stateKernelDriverReady)
+                HardwareStateRow(label = "Audio Routing Ready", status = stateAudioRoutingReady)
+                HardwareStateRow(label = "FM Interface Ready", status = stateFmInterfaceReady)
+                HardwareStateRow(label = "FM Powered", status = stateFmPowered)
+                HardwareStateRow(label = "FM Operational", status = stateFmOperational)
             }
 
             HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
@@ -1120,18 +1132,12 @@ fun IndividualDiagnosticsPanel(
 
             DiagnosticStatusRow(
                 label = "V4L2 Tuner Node (/dev/radio0)",
-                statusText = when {
-                    stage4 -> "Opened"
-                    hasDriverNode && hasPermissionDenied -> "SELinux Block / Permission Denied"
-                    hasDriverNode -> "Present (Closed)"
-                    else -> "Missing"
+                statusText = when (stateKernelDriverReady) {
+                    DiagnosticStatusType.SUCCESS -> "Opened successfully"
+                    DiagnosticStatusType.WARNING -> "SELinux Block / Permission Denied"
+                    else -> "Absent"
                 },
-                statusType = when {
-                    stage4 -> DiagnosticStatusType.SUCCESS
-                    hasDriverNode && hasPermissionDenied -> DiagnosticStatusType.WARNING
-                    hasDriverNode -> DiagnosticStatusType.INFO
-                    else -> DiagnosticStatusType.ERROR
-                }
+                statusType = stateKernelDriverReady
             )
 
             DiagnosticStatusRow(
@@ -1144,28 +1150,44 @@ fun IndividualDiagnosticsPanel(
 }
 
 @Composable
-fun HardwareStageRow(label: String, active: Boolean) {
+fun HardwareStateRow(label: String, status: DiagnosticStatusType) {
+    val isLight = MaterialTheme.colorScheme.background.toArgb() > Color.Gray.toArgb()
+    val bgColor = when (status) {
+        DiagnosticStatusType.SUCCESS -> Color(0xFF2E7D32).copy(alpha = 0.12f)
+        DiagnosticStatusType.WARNING -> Color(0xFFEF6C00).copy(alpha = 0.12f)
+        DiagnosticStatusType.ERROR -> Color(0xFFC62828).copy(alpha = 0.12f)
+        DiagnosticStatusType.INFO -> MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+    }
+    val textColor = when (status) {
+        DiagnosticStatusType.SUCCESS -> if (isLight) Color(0xFF1B5E20) else Color(0xFF81C784)
+        DiagnosticStatusType.WARNING -> if (isLight) Color(0xFFE65100) else Color(0xFFFFB74D)
+        DiagnosticStatusType.ERROR -> if (isLight) Color(0xFFB71C1C) else Color(0xFFE57373)
+        DiagnosticStatusType.INFO -> MaterialTheme.colorScheme.primary
+    }
+    val icon = when (status) {
+        DiagnosticStatusType.SUCCESS -> Icons.Default.CheckCircle
+        DiagnosticStatusType.WARNING -> Icons.Default.Warning
+        DiagnosticStatusType.ERROR -> Icons.Default.Cancel
+        DiagnosticStatusType.INFO -> Icons.Default.DeveloperMode
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .background(
-                if (active) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f)
-                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.1f)
-            )
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .background(bgColor)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
-            color = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+            color = textColor
         )
         Icon(
-            imageVector = if (active) Icons.Default.CheckCircle else Icons.Default.Cancel,
-            contentDescription = if (active) "Ready" else "Not Ready",
-            tint = if (active) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
+            imageVector = icon,
+            contentDescription = label,
+            tint = textColor,
             modifier = Modifier.size(18.dp)
         )
     }
