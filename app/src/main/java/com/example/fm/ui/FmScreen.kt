@@ -154,14 +154,14 @@ fun FmScreen(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "FM Hardware Unavailable",
+                                text = "FM Hardware Driver Blocked",
                                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                                 color = MaterialTheme.colorScheme.onErrorContainer
                             )
                         }
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "Low-level driver nodes (/dev/radio0) and Qualcomm dynamic libraries are missing. This indicates the application is running on an unsupported architecture, a virtual emulator, or a device without a physical Qualcomm/Samsung FM tuner chip. Please review the detailed diagnostics report and ELF analysis logs below.",
+                            text = "Low-level driver nodes (/dev/radio0) and manufacturer FM HAL libraries are missing or restricted. This is expected on devices without built-in FM chips, or due to Android SELinux kernel policies blocking direct hardware access for third-party apps.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.85f)
                         )
@@ -587,7 +587,7 @@ fun TunerControlPanel(
         ) {
             Button(
                 onClick = { viewModel.togglePower() },
-                enabled = isHwSupported,
+                enabled = true,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = powerButtonColor,
                     disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
@@ -1280,7 +1280,10 @@ fun PowerErrorCard(
                 color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.9f)
             )
 
-            Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
                 Button(
                     onClick = {
                         onDismiss()
@@ -1289,7 +1292,8 @@ fun PowerErrorCard(
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.onError,
                         contentColor = MaterialTheme.colorScheme.onErrorContainer
-                    )
+                    ),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("Rescan Hardware", style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold))
                 }

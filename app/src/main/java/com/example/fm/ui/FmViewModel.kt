@@ -2,16 +2,20 @@ package com.example.fm.ui
 
 import android.app.Application
 import android.content.Context
-import android.media.AudioDeviceInfo
-import android.media.AudioManager
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import com.example.fm.FmNative
 import com.example.fm.data.FmPreset
 import com.example.fm.data.FmRepository
+import com.example.fm.diagnostics.OpenFmDiagnostics
+import com.example.fm.sdk.OpenFmException
+import com.example.fm.sdk.OpenFmListener
+import com.example.fm.sdk.OpenFmManager
+import com.example.fm.sdk.OpenFmRds
+import com.example.fm.sdk.OpenFmSession
+import com.example.fm.sdk.OpenFmStation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -28,7 +32,8 @@ class FmViewModel(
     private val repository: FmRepository
 ) : AndroidViewModel(application) {
 
-    private val audioManager = application.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    private val openFmManager = OpenFmManager(application)
+    private var openFmSession: OpenFmSession? = null
 
     // UI state flows
     private val _isPowerOn = MutableStateFlow(false)
@@ -83,7 +88,7 @@ class FmViewModel(
     fun refreshDiagnostics() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val report = FmNative.getDiagnosticsReport()
+                val report = OpenFmDiagnostics.executeAssessment(getApplication()).readableReport
                 _diagnosticsReport.value = report
             } catch (e: Throwable) {
                 Log.e("FmViewModel", "Error fetching diagnostics", e)
@@ -95,7 +100,7 @@ class FmViewModel(
     fun checkHardwareSupport() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val supported = FmNative.isHardwareSupported()
+                val supported = openFmManager.isHardwareSupported()
                 _isHwSupported.value = supported
             } catch (e: Throwable) {
                 Log.e("FmViewModel", "Error checking hardware support", e)
@@ -106,15 +111,14 @@ class FmViewModel(
 
     fun checkHeadsetConnection() {
         try {
-            val devices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS or AudioManager.GET_DEVICES_OUTPUTS)
-            var connected = false
-            for (device in devices) {
-                if (device.type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
-                    device.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES
-                ) {
-                    connected = true
-                    break
-                }
+            val session = openFmSession
+            val connected = if (session != null) {
+                session.audio.isHeadsetConnected()
+            } else {
+                // Fallback local check
+                val audioManager = getApplication<Application>().getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+                @Suppress("DEPRECATION")
+                audioManager.isWiredHeadsetOn
             }
             _headsetConnected.value = connected
         } catch (e: Exception) {
@@ -131,10 +135,11 @@ class FmViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             if (_isPowerOn.value) {
                 try {
-                    FmNative.closeFm()
+                    openFmSession?.stop()
                 } catch (e: Throwable) {
-                    Log.e("FmViewModel", "Native closeFm failure", e)
+                    Log.e("FmViewModel", "SDK Session stop failure", e)
                 }
+                openFmSession = null
                 _isPowerOn.value = false
                 _rdsText.value = null
                 _rssi.value = 0
@@ -143,26 +148,52 @@ class FmViewModel(
             } else {
                 _lastPowerError.value = null
                 try {
-                    val res = FmNative.initFm()
-                    if (res >= 0) {
-                        _isPowerOn.value = true
-                        _lastPowerError.value = null
-                        val freq = FmNative.getFrequency()
-                        if (freq in 87500..108000) {
-                            _currentFreqKHz.value = freq
-                        } else {
-                            FmNative.setFrequency(_currentFreqKHz.value)
+                    val session = openFmManager.openSession(object : OpenFmListener {
+                        override fun onPowerStatusChanged(isPowerOn: Boolean) {
+                            _isPowerOn.value = isPowerOn
                         }
-                        _isMuted.value = FmNative.isMuted()
-                        startPolling()
-                    } else {
-                        Log.e("FmViewModel", "FM hardware init failed")
-                        _lastPowerError.value = "FM Driver Init Failed: No accessible hardware interface found (No /dev/radio0 and no loadable QTI HAL libraries on this Samsung SoC)."
-                        refreshDiagnostics()
-                    }
+
+                        override fun onFrequencyChanged(frequencyKHz: Int) {
+                            _currentFreqKHz.value = frequencyKHz
+                        }
+
+                        override fun onRdsUpdated(rds: OpenFmRds) {
+                            _rdsText.value = rds.rt ?: rds.ps
+                        }
+
+                        override fun onSignalStrengthChanged(signalStrength: Int) {
+                            _rssi.value = signalStrength
+                        }
+
+                        override fun onScanFinished(success: Boolean, station: OpenFmStation?) {
+                            _isScanning.value = false
+                            if (success && station != null) {
+                                _currentFreqKHz.value = station.frequencyKHz
+                            }
+                        }
+
+                        override fun onAudioRouteChanged(route: String) {
+                            _audioRoute.value = route
+                        }
+
+                        override fun onError(exception: OpenFmException) {
+                            _lastPowerError.value = exception.message
+                        }
+                    })
+
+                    openFmSession = session
+                    _isPowerOn.value = true
+                    _lastPowerError.value = null
+                    
+                    // Inquire initial tuned freq
+                    val initialFreq = session.receiver.isMuted() // probe
+                    session.receiver.tune(_currentFreqKHz.value)
+                    _isMuted.value = session.receiver.isMuted()
+                    _audioRoute.value = session.audio.getActiveRoute()
+                    startPolling()
                 } catch (e: Throwable) {
-                    Log.e("FmViewModel", "Error turning FM on", e)
-                    _lastPowerError.value = "Error: ${e.message}"
+                    Log.e("FmViewModel", "Error turning FM on via SDK", e)
+                    _lastPowerError.value = "OpenFM SDK Session Failed: " + (e.message ?: "Tuner hardware or custom libraries are restricted on this firmware.")
                     refreshDiagnostics()
                 }
             }
@@ -175,9 +206,9 @@ class FmViewModel(
             _currentFreqKHz.value = freqKHz
             if (_isPowerOn.value) {
                 try {
-                    FmNative.setFrequency(freqKHz)
+                    openFmSession?.receiver?.tune(freqKHz)
                 } catch (e: Throwable) {
-                    Log.e("FmViewModel", "Native setFrequency failure", e)
+                    Log.e("FmViewModel", "SDK tune failure", e)
                 }
                 _rdsText.value = null
             }
@@ -200,24 +231,12 @@ class FmViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             _isScanning.value = true
             _rdsText.value = null
-            val direction = if (up) 1 else 0
             try {
-                FmNative.startSearch(direction)
+                openFmSession?.scanner?.seek(if (up) 1 else 0)
             } catch (e: Throwable) {
-                Log.e("FmViewModel", "Native startSearch failure", e)
+                Log.e("FmViewModel", "SDK Scanner seek failure", e)
+                _isScanning.value = false
             }
-            
-            // Allow the hardware tuner up to 1.5 seconds to scan and lock
-            delay(1500)
-            try {
-                val freq = FmNative.getFrequency()
-                if (freq in 87500..108000) {
-                    _currentFreqKHz.value = freq
-                }
-            } catch (e: Throwable) {
-                Log.e("FmViewModel", "Native getFrequency failure during scan", e)
-            }
-            _isScanning.value = false
         }
     }
 
@@ -226,22 +245,23 @@ class FmViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             val nextMute = !_isMuted.value
             try {
-                FmNative.setMute(nextMute)
-                _isMuted.value = nextMute
+                val success = openFmSession?.receiver?.setMute(nextMute) ?: false
+                if (success) {
+                    _isMuted.value = nextMute
+                }
             } catch (e: Throwable) {
-                Log.e("FmViewModel", "Native setMute failure", e)
+                Log.e("FmViewModel", "SDK setMute failure", e)
             }
         }
     }
 
     fun toggleAudioRoute() {
+        val session = openFmSession ?: return
         try {
-            if (_audioRoute.value.startsWith("Wired")) {
-                audioManager.isSpeakerphoneOn = true
-                _audioRoute.value = "Speaker"
-            } else {
-                audioManager.isSpeakerphoneOn = false
-                _audioRoute.value = "Wired Headset"
+            val current = session.audio.getActiveRoute()
+            val next = if (current.equals("SPEAKER", ignoreCase = true)) "HEADSET" else "SPEAKER"
+            if (session.audio.setAudioRoute(next)) {
+                _audioRoute.value = session.audio.getActiveRoute()
             }
         } catch (e: Exception) {
             Log.e("FmViewModel", "Routing toggle failed", e)
@@ -272,16 +292,19 @@ class FmViewModel(
             while (true) {
                 if (_isPowerOn.value) {
                     try {
-                        _rssi.value = FmNative.getSignalStrength()
-                        val rds = FmNative.getRdsData()
-                        if (rds != null && rds != _rdsText.value) {
-                            _rdsText.value = rds
+                        val session = openFmSession
+                        if (session != null) {
+                            _rssi.value = com.example.fm.FmNative.getSignalStrength()
+                            val rdsTextStr = com.example.fm.FmNative.getRdsData()
+                            if (rdsTextStr != null && rdsTextStr != _rdsText.value) {
+                                _rdsText.value = rdsTextStr
+                            }
                         }
                     } catch (e: Throwable) {
                         Log.e("FmViewModel", "Native polling failure", e)
                     }
                 }
-                delay(2000)
+                delay(1000)
             }
         }
     }
@@ -297,7 +320,7 @@ class FmViewModel(
         if (_isPowerOn.value) {
             CoroutineScope(Dispatchers.IO).launch {
                 try {
-                    FmNative.closeFm()
+                    openFmSession?.stop()
                 } catch (e: Throwable) {
                     Log.e("FmViewModel", "Native closeFm onCleared failure", e)
                 }
